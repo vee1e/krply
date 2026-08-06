@@ -143,13 +143,38 @@ function buildTree(changes, side) {
   return root;
 }
 
+// pathTokens splits a dotted path like "spec.template.spec.containers[0].image"
+// into key/index tokens. The server escapes '.', '[', ']' and '\' in segment
+// names with a backslash (annotation keys such as "helm.sh/hook"), which the
+// tokenizer unescapes so dotted keys stay a single segment.
 const pathTokens = (p) => {
   const out = [];
-  const re = /([^\[\].]+)(?:\[(\d+)\])?/g;
-  let m;
-  while ((m = re.exec(p || ''))) {
-    out.push({ key: m[1], index: m[2] != null ? Number(m[2]) : null });
+  let key = '';
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '\\' && i + 1 < p.length) {
+      key += p[i + 1];
+      i++;
+    } else if (c === '.') {
+      if (key) out.push({ key, index: null });
+      key = '';
+    } else if (c === '[') {
+      let j = i + 1;
+      let idx = '';
+      while (j < p.length && p[j] !== ']') {
+        idx += p[j];
+        j++;
+      }
+      const index = Number(idx);
+      if (key) out.push({ key, index });
+      else if (out.length) out[out.length - 1].index = index;
+      key = '';
+      i = j;
+    } else {
+      key += c;
+    }
   }
+  if (key) out.push({ key, index: null });
   return out;
 };
 

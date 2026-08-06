@@ -6,6 +6,7 @@
   "description": "Dependency-light static UI for krply-server",
   "scripts": {
     "build": "node build.mjs",
+    "lint": "node --check src/api.js && node --check src/app.js && node --check src/util.js && node --check src/views/coverage.js && node --check src/views/diff.js && node --check src/views/plans.js && node --check src/views/snapshots.js && node --check src/views/streams.js && node --check src/views/timeline.js",
     "start": "node build.mjs && npx serve dist"
   }
 }

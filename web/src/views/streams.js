@@ -9,7 +9,14 @@ export async function viewStreams(mount) {
   ]));
   mount.appendChild(el('hr', { className: 'rule' }));
 
-  const streams = asList(await api.streams());
+  let streams, events;
+  try {
+    streams = asList(await api.streams());
+    events = asList(await api.eventsAll({}));
+  } catch (err) {
+    mount.appendChild(el('div', { className: 'notice error', textContent: `failed to load streams: ${err.message || String(err)}` }));
+    return;
+  }
   if (!streams.length) {
     mount.appendChild(emptyState(
       'No streams recorded yet.',
@@ -18,7 +25,6 @@ export async function viewStreams(mount) {
     return;
   }
 
-  const events = asList(await api.events({ limit: 2000 }).catch(() => []));
   const span = observedSpan(events);
 
   mount.appendChild(simpleTable(

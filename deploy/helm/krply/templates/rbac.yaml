@@ -1,9 +1,14 @@
-# Recorder RBAC for the krply-server ServiceAccount.
-#
-# Read-only: get/list/watch on the exact resources krply captures. No Secrets,
-# no wildcards, no write verbs. Mirrors deploy/rbac/recorder-clusterrole.yaml.
-# Disable with --set rbac.create=false if you bind an existing role instead.
-{{- if .Values.rbac.create }}
+{{/*
+krply-server is a query API, materializer, and replay planner: it reads the
+SQLite journal and, only when a replay is run, resolves the target cluster
+through its own in-cluster configuration. It performs no listing or watching,
+so its ServiceAccount needs no ClusterRole.
+
+When you co-locate a `krply record` agent in this chart, bind the agent's
+ServiceAccount to deploy/rbac/recorder-clusterrole.yaml instead; that role is
+read-only get/list/watch on the MVP resources with no Secrets access.
+*/}}
+{{- if .Values.rbac.recorder.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -20,19 +25,4 @@ rules:
   - apiGroups: ["node.k8s.io"]
     resources: ["runtimeclasses"]
     verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "krply.fullname" . }}-recorder
-  labels:
-    {{- include "krply.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "krply.fullname" . }}-recorder
-subjects:
-  - kind: ServiceAccount
-    name: {{ include "krply.fullname" . }}
-    namespace: {{ .Release.Namespace }}
 {{- end }}

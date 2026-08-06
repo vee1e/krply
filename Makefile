@@ -28,7 +28,7 @@ test-e2e:
 
 lint:
 	go vet ./...
-	cd web && npm run lint 2>/dev/null || true
+	cd web && npm run lint
 
 vet:
 	go vet ./...

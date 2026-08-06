@@ -61,11 +61,14 @@ func correlationRecord(evt AuditEvent, matched *event.Record) *event.Record {
 	}
 }
 
-// auditEventID derives a deterministic key for an audit event. The same
-// request against the same object always produces the same ID.
+// auditEventID derives a deterministic key for an audit event. Stage and
+// response code are included so the multi-stage lines of one request
+// (RequestReceived / ResponseStarted / ResponseComplete) do not collapse to a
+// single record under the journal's event_id deduplication, which would drop
+// the authoritative ResponseComplete stage.
 func auditEventID(evt AuditEvent) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", evt.ClusterID, evt.RequestID, evt.Namespace, evt.Name, evt.UID, evt.ResourceVersion)
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d", evt.ClusterID, evt.RequestID, evt.Namespace, evt.Name, evt.UID, evt.ResourceVersion, evt.Stage, evt.ResponseCode)
 	return "audit-" + hex.EncodeToString(h.Sum(nil))
 }
 

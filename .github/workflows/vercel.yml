@@ -19,15 +19,21 @@ jobs:
   deploy:
     name: deploy web ui
     runs-on: ubuntu-latest
+    # The vercel-action receives a deploy token, so only runs on pushes where
+    # the repository secrets are available and readable content. Fork PRs are
+    # skipped because they never receive repository secrets.
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Requires repository secrets:
       #   VERCEL_TOKEN       personal access token (vercel.com/account/tokens)
       #   VERCEL_ORG_ID      org id (vercel.com -> account settings)
       #   VERCEL_PROJECT_ID  project id (vercel.com -> project settings)
       - name: Deploy to Vercel
-        uses: amondnet/vercel-action@v20
+        uses: amondnet/vercel-action@2d78157ee070f28ff89dd4da74e0369fc26d3b34 # v20
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}

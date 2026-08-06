@@ -35,7 +35,6 @@ export async function viewPlans(mount) {
   const sourceInput = el('input', { type: 'text', placeholder: 'source namespace' });
   const targetInput = el('input', { type: 'text', placeholder: 'target namespace' });
   const list = el('div', { className: 'plan-list' });
-  let bootstrapped = false;
 
   const defCluster = pickFirst(clusterList);
   const defSnapshot = pickLatestSnapshot(snapshotList);
@@ -91,7 +90,6 @@ export async function viewPlans(mount) {
       list.textContent = '';
       if (!plans.length) {
         list.appendChild(el('p', { className: 'muted', textContent: 'No plans yet — create one above.' }));
-        bootstrapIfEmpty();
         return;
       }
       for (const p of plans) list.appendChild(planCard(p));
@@ -101,23 +99,6 @@ export async function viewPlans(mount) {
     }
   }
   await load();
-
-  // Demo bootstrap: with a real cluster + snapshot, auto-create one plan so a
-  // visitor sees a populated page without filling the form.
-  async function bootstrapIfEmpty() {
-    if (bootstrapped) return;
-    bootstrapped = true;
-    const body = {
-      cluster_id: clusterSel.value,
-      snapshot_id: snapshotSel.value,
-      source_namespace: sourceInput.value.trim(),
-      target_namespace: targetInput.value.trim(),
-    };
-    if (!body.cluster_id || !body.snapshot_id || !body.source_namespace || !body.target_namespace) return;
-    const plans = asList(await api.plans().catch(() => []));
-    if (plans.length) return;
-    create(body);
-  }
 }
 
 const itemName = (x) => (x.namespace ? `${x.namespace}/${x.name}` : x.name);
@@ -178,13 +159,17 @@ function planCard(p) {
     drySection.appendChild(el('p', { className: 'muted', textContent: 'running dry-run…' }));
     try {
       const r = await api.dryRun({ plan_id: p.id });
+      // The server returns the full plan with the result nested under
+      // dry_run_result; fall back to the top level defensively.
+      const dr = r.dry_run_result || r;
       drySection.textContent = '';
       drySection.appendChild(el('div', {}, [
         el('span', { textContent: 'dry-run: ' }),
-        r.ok ? badge('OK', 'ok') : badge('NOT OK', 'gap'),
-        el('span', { textContent: ` · applied ${r.applied}` }),
+        dr.ok ? badge('OK', 'ok') : badge('NOT OK', 'gap'),
+        el('span', { textContent: ` · applied ${dr.applied}` }),
+        el('span', { textContent: ` · skipped ${asList(dr.skipped).length}` }),
       ]));
-      for (const [label, list] of [['conflicts', r.conflicts], ['errors', r.errors]]) {
+      for (const [label, list] of [['conflicts', dr.conflicts], ['errors', dr.errors], ['skipped', dr.skipped]]) {
         if (asList(list).length) {
           drySection.appendChild(el('div', { className: 'subsection' }, [
             el('h4', { textContent: label }),

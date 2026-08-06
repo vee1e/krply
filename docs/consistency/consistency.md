@@ -62,9 +62,10 @@ The journal write uses the write-event-then-checkpoint order:
 
 1. Write the raw event first.
 2. Update the checkpoint in the same transaction.
-3. On restart, replay from the last checkpoint and deduplicate.
 
-This gives at-least-once delivery with deterministic deduplication. If the process crashes between writing an event and its checkpoint, the event may be written again. The field event_id is a deterministic key derived from the stream, the resource, the watch type, and the observed time. This key makes re-application idempotent.
+Within a session, a reconnect resumes from the last durable resource version, so nothing after it is missed. After a process restart the collector performs a fresh list and baseline rather than resuming from the stored checkpoint; the journal deduplicates any event that is redelivered, so the fresh baseline and its synthetic events coexist with the earlier history.
+
+This gives at-least-once delivery with deterministic deduplication. If the process crashes between writing an event and its checkpoint, the event may be written again. The field event_id is a deterministic key derived from the stream, the resource, and the watch type (synthetic relist baselines also mix in the list observation time so a re-listed object is a new observation, not a duplicate). This key makes re-application idempotent.
 
 These behaviors are NOT guaranteed:
 

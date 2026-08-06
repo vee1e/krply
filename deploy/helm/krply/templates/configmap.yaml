@@ -5,5 +5,5 @@ metadata:
   labels:
     {{- include "krply.labels" . | nindent 4 }}
 data:
-  store-path: {{ .Values.store.path | quote }}
-  listen: ":{{ .Values.listen.port }}"
+  STORE_PATH: {{ .Values.store.path | quote }}
+  LISTEN_ADDR: ":{{ .Values.listen.port }}"

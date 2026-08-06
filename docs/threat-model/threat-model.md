@@ -14,7 +14,7 @@ This document lists the threats that krply is designed against, the controls tha
 | Invalid owner references | Orphaned objects | Remove or remap UIDs, replay roots only | replay-safety |
 | Name collision | Community confusion | Rename or coordinate | none |
 
-Each row of the risk table maps to at least one control above. The controls are structural. The journal format, the planner policy, and the RBAC manifests enforce them. They do not depend on operator discipline alone.
+Each row of the risk table maps to at least one control above. The controls are structural. The journal format, the planner policy, and the RBAC manifests enforce them. They do not depend on operator discipline alone. The exception is the HTTP API surface, which is unauthenticated by design and relies on network placement; see "HTTP API surface" below.
 
 ## Trust boundaries
 
@@ -51,7 +51,19 @@ Rules:
 - No cluster-admin.
 - No write access to the source cluster.
 
-Reference manifests: ../../deploy/rbac/. The Helm chart ships a recorder ClusterRole bound to its own ServiceAccount. See ../../deploy/helm/krply/.
+Reference manifests: ../../deploy/rbac/. The Helm chart ships no ClusterRole for the krply-server ServiceAccount because the server reads only the journal and resolves the replay target through its own in-cluster configuration. See ../../deploy/helm/krply/.
+
+## HTTP API surface
+
+The query API served by krply-server is **unauthenticated** and is intended to run on a trusted network. This is a deliberate simplification, not a hard control:
+
+| Surface | Risk | Mitigation (as shipped) |
+|---|---|---|
+| Read endpoints (`/v1/health`, clusters, streams, events, history, diff, snapshots, plans) | Anyone who can reach the port can read the journal, which may contain recorded ConfigMaps and object bodies | Bind to a trusted interface, place the server behind an authenticated reverse proxy, or restrict it to loopback; do not expose it to the public internet |
+| `POST /v1/replay-plans/{id}/dry-run` and `POST /v1/replay-runs` | A network peer could trigger a dry run or an apply against the target cluster | The server resolves the target cluster only through its own kubeconfig and never accepts a client-supplied kubeconfig. Apply requires `confirm: true` and a plan whose dry run already succeeded; plans are held in server memory and are not persisted across restarts |
+| CORS | A malicious web page could drive the API from a victim's browser | Set `KRPLY_CORS_ORIGINS` to an explicit allowlist. The default is `*`, so the wildcard must be overridden before the server is exposed anywhere a browser could reach it |
+
+If the server is exposed beyond a trusted network, add authentication and TLS at the proxy before it.
 
 ## What the tool does NOT claim
 

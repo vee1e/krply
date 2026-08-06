@@ -11,7 +11,7 @@ Replay does NOT mean sending historical events back to a live cluster. krply rec
 5. **Sort resources by dependency**. Sort namespaces first, then declarative roots.
 6. **Run a server-side dry run** with the synthetic field manager.
 7. **Show the plan and warnings**. Include dry-run conflicts and errors.
-8. **Apply only after explicit approval**. The replay apply command requires a target context, a plan ID, a namespace allowlist, a successful dry run, and a confirmation flag.
+8. **Apply only after explicit approval**. The replay apply command requires a successful dry run and a confirmation flag. A target namespace, when provided, is always honored.
 9. **Observe the target without assuming convergence**. The tool does not prove that the target reached the intended state. Target controllers may still change it.
 
 ## Sanitization defaults
@@ -79,8 +79,8 @@ Only these kinds can be replayed in the MVP:
 The planner refuses to produce or apply a plan in these cases:
 
 - **Coverage is incomplete**. Any stream that feeds the plan has an unresolved gap, unless the Policy flag AllowGaps is set explicitly.
-- **Dry run fails**. The server-side dry run reports conflicts or errors that are not overridden.
-- **No explicit approval**. The apply command is missing the target context, the plan ID, a namespace allowlist, a successful dry run, or the confirmation flag.
+- **Dry run fails**. The server-side dry run reports conflicts, errors, or skipped objects, and Apply refuses unless the plan status is "dry-run-ok".
+- **No explicit approval**. The apply command is missing the confirmation flag or a successful dry run. The target namespace, when given, is always honored, and objects are filtered to the source namespace first.
 - **Excluded kinds requested**. A request to replay an excluded kind, such as Secrets, Pods, RBAC, PVs, webhooks, or CRDs, is refused unless the corresponding Policy allowlist flag is set.
 
 ```mermaid

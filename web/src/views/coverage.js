@@ -11,9 +11,20 @@ export async function viewCoverage(mount) {
   ]));
   mount.appendChild(el('hr', { className: 'rule' }));
 
-  const [c, s] = await Promise.all([api.clusters().catch(() => []), api.streams().catch(() => [])]);
-  const clusters = asList(c);
-  const streams = asList(s);
+  let clusters, streams, events;
+  try {
+    [clusters, streams, events] = await Promise.all([
+      api.clusters(),
+      api.streams(),
+      api.eventsAll({}),
+    ]);
+  } catch (err) {
+    mount.appendChild(el('div', { className: 'notice error', textContent: `failed to load coverage: ${err.message || String(err)}` }));
+    return;
+  }
+  clusters = asList(clusters);
+  streams = asList(streams);
+  events = asList(events);
 
   if (!clusters.length && !streams.length) {
     mount.appendChild(emptyState(
@@ -22,8 +33,6 @@ export async function viewCoverage(mount) {
     ));
     return;
   }
-
-  const events = asList(await api.events({ limit: 2000 }).catch(() => []));
 
   const byCluster = new Map();
   for (const st of streams) {

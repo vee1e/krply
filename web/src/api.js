@@ -55,6 +55,19 @@ export const api = {
   clusters: () => request('/v1/clusters'),
   streams: () => request('/v1/streams'),
   events: (q) => request('/v1/events?' + qs(q)),
+  // eventsAll follows cursor pagination so the whole journal is fetched, not
+  // just the first (oldest) page. Bounded to 20 pages of 1000.
+  eventsAll: async (q = {}) => {
+    const all = [];
+    let cursor = '';
+    for (let i = 0; i < 20; i++) {
+      const page = await api.events({ ...q, limit: 1000, ...(cursor ? { cursor } : {}) });
+      all.push(...asList(page.items));
+      if (!page.has_more || !page.next_cursor) break;
+      cursor = page.next_cursor;
+    }
+    return all;
+  },
   history: (cluster, stream, ns, name, since) =>
     request(`/v1/objects/${enc(objectRef({ cluster, stream, ns, name }))}/history` + (since ? '?' + qs({ since }) : '')),
   diff: (q) => request('/v1/diff?' + qs(q)),
@@ -66,6 +79,10 @@ export const api = {
     body: JSON.stringify(body),
   }),
 };
+
+function asList(v) {
+  return Array.isArray(v) ? v : [];
+}
 
 // objectRef encodes the composite object reference as a single base64url token
 // (stream IDs contain slashes and cannot be path segments).

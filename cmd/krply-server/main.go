@@ -79,10 +79,11 @@ func seedDemo(ctx context.Context, store storage.Store, demoPath string) error {
 
 func run() error {
 	var (
-		storePath = flag.String("store", "krply.db", "path to the SQLite journal")
-		listen    = flag.String("listen", ":8080", "listen address")
-		demoPath  = flag.String("demo", "", "seed an empty journal from this SQLite demo fixture")
-		showVer   = flag.Bool("version", false, "print version and exit")
+		storePath    = flag.String("store", "krply.db", "path to the SQLite journal")
+		listen       = flag.String("listen", ":8080", "listen address")
+		demoPath     = flag.String("demo", "", "seed an empty journal from this SQLite demo fixture")
+		showVer      = flag.Bool("version", false, "print version and exit")
+		storeFlagSet bool
 	)
 	flag.Parse()
 
@@ -97,9 +98,18 @@ func run() error {
 		if f.Name == "listen" {
 			listenFlagSet = true
 		}
+		if f.Name == "store" {
+			storeFlagSet = true
+		}
 	})
 	if !listenFlagSet && os.Getenv("PORT") != "" {
 		listenAddr = ":" + os.Getenv("PORT")
+	}
+	if !listenFlagSet && os.Getenv("LISTEN_ADDR") != "" {
+		listenAddr = os.Getenv("LISTEN_ADDR")
+	}
+	if !storeFlagSet && os.Getenv("STORE_PATH") != "" {
+		*storePath = os.Getenv("STORE_PATH")
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))

@@ -9,7 +9,7 @@ Every journal record is an immutable entry. The wire format is api/event/v1. Thi
 | cluster_id | Separates resource version and UID domains; one per physical cluster |
 | stream_id | Identifies group, version, resource, namespace, and selector |
 | event_id | Deterministic deduplication key |
-| ingest_sequence | Local storage order (ascending); returned in this order |
+| ingest_seq | Local storage order (ascending); returned in this order |
 | observed_at | Collector observation time |
 | watch_type | Original event type (ADDED, MODIFIED, DELETED, BOOKMARK, ERROR) |
 | synthetic | True for baseline events |
@@ -44,11 +44,11 @@ The field event_id is the deterministic deduplication key. The derivation is:
 EventID(stream, resource, watchType, observedAt) -> string
 ```
 
-The inputs are the stream identity, the resource reference, the watch type, and the observed time. The same key is recomputed for a redelivered event, for example after a reconnect or a crash before the checkpoint. Re-application is therefore idempotent. This makes at-least-once ingestion safe. See ../consistency/consistency.md for the ingestion guarantee.
+The inputs are the stream identity, the resource reference, and the watch type. For live watch events the observed time is deliberately excluded: the same underlying API event must always produce the same key, so a duplicate delivery after a reconnect is idempotent. Collector-generated synthetic baselines pass the list observation time, so an unchanged object re-listed after a gap is treated as a new observation rather than a duplicate and survives deduplication. See ../consistency/consistency.md for the ingestion guarantee.
 
 ## object_hash
 
-The function ObjectHash(objectJSON) returns a fast equality and deduplication hash over the raw object payload. It lets consumers detect that a MODIFIED event did not change the object. It lets the store collapse no-op writes. It is not a cryptographic commitment. Treat it as a performance and equality helper only.
+The function ObjectHash(objectJSON) returns a fast equality hash over the raw object payload. It lets consumers detect that a MODIFIED event did not change the object. It is not a cryptographic commitment. Treat it as a performance and equality helper only. Deduplication is by event_id, not by object content.
 
 ## Provenance
 

@@ -5,16 +5,21 @@ image:
   tag: dev
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+
 nameOverride: ""
 fullnameOverride: ""
 
 store:
+  # Path of the SQLite journal inside the container. It must live under /data,
+  # which is the volume mounted for the store.
   path: /data/krply.db
-  # PersistentVolumeClaim to back the store path. If empty, an emptyDir is used.
+  # The journal is the primary data of krply, so a PersistentVolumeClaim is the
+  # default. Set enabled: false to use an emptyDir (ephemeral, lost on restart).
   persistence:
-    enabled: false
+    enabled: true
     storageClass: ""
-    size: 10Gi
+    size: 1Gi
 
 listen:
   port: 8080
@@ -23,10 +28,12 @@ service:
   type: ClusterIP
   port: 8080
 
-# Create a recorder ClusterRole/Binding for the service account. See
-# deploy/rbac/recorder-clusterrole.yaml for the full reference role.
+# The krply-server ServiceAccount needs no RBAC (it reads the journal and
+# resolves the target cluster through its in-cluster configuration). Enable
+# recorder.create only when a `krply record` agent runs in this chart.
 rbac:
-  create: true
+  recorder:
+    create: false
 
 replicaCount: 1
 

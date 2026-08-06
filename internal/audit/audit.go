@@ -63,12 +63,21 @@ func (c *Correlator) Match(ctx context.Context, evt AuditEvent) (string, error) 
 }
 
 func (c *Correlator) matchRecord(ctx context.Context, evt AuditEvent) (*event.Record, error) {
-	recs, err := c.store.Events(ctx, storage.EventFilter{
+	// The correlated journal event must be close in time to the audit line, so
+	// the scan is bounded to a window and a page instead of the object's whole
+	// history.
+	f := storage.EventFilter{
 		ClusterID:  evt.ClusterID,
 		Namespace:  evt.Namespace,
 		Name:       evt.Name,
 		RecordType: event.TypeEvent,
-	})
+		Limit:      500,
+	}
+	if !evt.Timestamp.IsZero() {
+		f.Since = evt.Timestamp.Add(-1 * time.Minute)
+		f.Until = evt.Timestamp.Add(1 * time.Minute)
+	}
+	recs, err := c.store.Events(ctx, f)
 	if err != nil {
 		return nil, err
 	}

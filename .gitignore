@@ -10,3 +10,8 @@ web/dist/
 .DS_Store
 coverage.out
 tmp/
+.env
+*.kubeconfig
+*.pem
+*.key
+deploy/compose/data/
