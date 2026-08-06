@@ -320,6 +320,9 @@ func (s *Server) handleObjectHistory(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "gaps", err)
 		return
 	}
+	// Scope gap markers to the requested window so an out-of-window historical
+	// gap does not make a gap-free window look incomplete.
+	gaps = filterByTime(gaps, since, until)
 
 	history := queryv1.ObjectHistory{
 		ClusterID: ref.ClusterID,

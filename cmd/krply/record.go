@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -47,6 +48,9 @@ func init() {
 }
 
 func runRecord(cmd *cobra.Command, args []string) error {
+	if serverURL != "" {
+		return errors.New("record runs against a live cluster with a local store; --server is not supported (omit --server)")
+	}
 	store, err := openStore(storePath)
 	if err != nil {
 		return err

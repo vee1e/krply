@@ -318,3 +318,96 @@ func TestPlanNamespaceMapping(t *testing.T) {
 		t.Fatalf("plan warnings %v lack a namespace mapping note", plan.Warnings)
 	}
 }
+
+func TestSanitizeServiceNodePortAndHeadless(t *testing.T) {
+	nodePort := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata":   map[string]any{"name": "np", "namespace": "default"},
+		"spec": map[string]any{
+			"type":       "NodePort",
+			"clusterIP":  "10.96.0.5",
+			"clusterIPs": []any{"10.96.0.5"},
+			"ports":      []any{map[string]any{"port": 80, "nodePort": 30080}},
+		},
+	}
+	clean, _ := sanitizeObject(nodePort, "Service", DefaultPolicy())
+	spec := clean["spec"].(map[string]any)
+	if _, ok := spec["clusterIP"]; ok {
+		t.Fatalf("NodePort service kept clusterIP: %+v", spec)
+	}
+	if _, ok := spec["clusterIPs"]; ok {
+		t.Fatalf("NodePort service kept clusterIPs: %+v", spec)
+	}
+	ports := spec["ports"].([]any)
+	pm := ports[0].(map[string]any)
+	if _, ok := pm["nodePort"]; ok {
+		t.Fatalf("NodePort service kept nodePort: %+v", pm)
+	}
+
+	headless := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata":   map[string]any{"name": "hl", "namespace": "default"},
+		"spec":       map[string]any{"type": "ClusterIP", "clusterIP": "None"},
+	}
+	clean2, _ := sanitizeObject(headless, "Service", DefaultPolicy())
+	if got := clean2["spec"].(map[string]any)["clusterIP"]; got != "None" {
+		t.Fatalf("headless service clusterIP = %v, want None", got)
+	}
+}
+
+func TestApplyRequiresDryRun(t *testing.T) {
+	plan := &Plan{
+		ID:     "plan-test",
+		Status: "planned",
+		Objects: []PlanObject{{
+			Namespace: "default", Name: "x", Kind: "ConfigMap",
+			Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "x"}},
+		}},
+	}
+	_, err := plan.Apply(context.Background(), "", "", true)
+	if err == nil {
+		t.Fatal("Apply without a successful dry run must be refused")
+	}
+}
+
+func TestApplyItemsReportsSkipped(t *testing.T) {
+	plan := &Plan{
+		Objects: []PlanObject{
+			{Namespace: "default", Name: "known", Kind: "ConfigMap", Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "known"}}},
+			{Namespace: "default", Name: "unknown", Kind: "MysteryKind", Object: map[string]any{"apiVersion": "acme.io/v1", "kind": "MysteryKind", "metadata": map[string]any{"name": "unknown"}}},
+		},
+	}
+	items, skipped := plan.applyItems()
+	if len(items) != 1 {
+		t.Fatalf("applyItems = %d items, want 1", len(items))
+	}
+	if len(skipped) != 1 || skipped[0].Kind != "MysteryKind" {
+		t.Fatalf("skipped = %+v, want 1 MysteryKind", skipped)
+	}
+}
+
+func TestGVRForCoversPolicyKinds(t *testing.T) {
+	for _, kind := range []string{"Secret", "Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding", "Job", "CronJob", "Pod", "PersistentVolume", "PersistentVolumeClaim", "StorageClass", "MutatingWebhookConfiguration", "ValidatingWebhookConfiguration", "CustomResourceDefinition"} {
+		apiVersion := "v1"
+		switch kind {
+		case "Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding":
+			apiVersion = "rbac.authorization.k8s.io/v1"
+		case "Job", "CronJob":
+			apiVersion = "batch/v1"
+		case "StorageClass":
+			apiVersion = "storage.k8s.io/v1"
+		case "PersistentVolume", "PersistentVolumeClaim":
+			apiVersion = "v1"
+		case "MutatingWebhookConfiguration", "ValidatingWebhookConfiguration":
+			apiVersion = "admissionregistration.k8s.io/v1"
+		case "CustomResourceDefinition":
+			apiVersion = "apiextensions.k8s.io/v1"
+		}
+		obj := map[string]any{"apiVersion": apiVersion, "kind": kind, "metadata": map[string]any{"name": "x"}}
+		if _, err := gvrFor(obj, kind); err != nil {
+			t.Fatalf("gvrFor(%s): %v", kind, err)
+		}
+	}
+}
