@@ -134,13 +134,20 @@ func (pl *Plan) dynamicClient(kubeconfig, targetContext string) (dynamic.Interfa
 	return dyn, nil
 }
 
-// restConfig builds a rest.Config from a kubeconfig path and context, falling
-// back to the in-cluster configuration when the path is empty.
+// restConfig builds a rest.Config from a kubeconfig path and context. When the
+// path is empty it resolves through the standard chain: in-cluster, then the
+// KUBECONFIG env var, then ~/.kube/config.
 func restConfig(kubeconfig, contextName string) (*rest.Config, error) {
 	if kubeconfig == "" {
-		cfg, err := rest.InClusterConfig()
+		if cfg, err := rest.InClusterConfig(); err == nil {
+			return cfg, nil
+		}
+		cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			clientcmd.NewDefaultClientConfigLoadingRules(),
+			&clientcmd.ConfigOverrides{},
+		).ClientConfig()
 		if err != nil {
-			return nil, fmt.Errorf("replay: in-cluster config: %w", err)
+			return nil, fmt.Errorf("replay: no cluster connection (no in-cluster service account and no kubeconfig): %w", err)
 		}
 		return cfg, nil
 	}
