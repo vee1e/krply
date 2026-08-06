@@ -1,12 +1,18 @@
 // Object timeline: observed events for one object, with GAP rows shown distinctly.
 import { api } from '../api.js';
 import { el, asList, badge, watchBadge, fmtTime, streamLabel, streamTitle, field, formCard } from '../util.js';
+import { pickFirst, pickObject, setSelect } from '../defaults.js';
 
 export async function viewTimeline(mount) {
   mount.appendChild(el('h1', { textContent: 'Object timeline' }));
-  const [clusters, streams] = await Promise.all([api.clusters().catch(() => []), api.streams().catch(() => [])]);
+  const [clusters, streams, evs] = await Promise.all([
+    api.clusters().catch(() => []),
+    api.streams().catch(() => []),
+    api.events({ limit: 30 }).catch(() => []),
+  ]);
   const clusterList = asList(clusters);
   const streamList = asList(streams);
+  const events = asList(evs);
 
   const clusterSel = el('select');
   clusterSel.appendChild(el('option', { value: '', textContent: '— cluster —' }));
@@ -29,14 +35,20 @@ export async function viewTimeline(mount) {
   const nameInput = el('input', { type: 'text', placeholder: 'name' });
   const sinceInput = el('input', { type: 'number', min: '1', max: '8760', value: '24' });
 
+  const defCluster = pickFirst(clusterList);
+  const defObject = pickObject(events);
+  if (defCluster) setSelect(clusterSel, defCluster.id);
+  fillStreams();
+  const defStream = streamList.find((st) => st.cluster_id === (defCluster && defCluster.id)) || pickFirst(streamList);
+  if (defStream) streamSel.value = defStream.id;
+  if (defObject) {
+    namespaceInput.value = defObject.namespace;
+    nameInput.value = defObject.name;
+  }
+
   const results = el('div');
-  mount.appendChild(formCard([
-    field('cluster', clusterSel),
-    field('stream', streamSel),
-    field('namespace', namespaceInput),
-    field('name', nameInput),
-    field('since (hours)', sinceInput),
-  ], 'show timeline', async () => {
+
+  async function run() {
     results.textContent = '';
     const cluster = clusterSel.value;
     const stream = streamSel.value;
@@ -57,8 +69,18 @@ export async function viewTimeline(mount) {
       results.textContent = '';
       results.appendChild(el('div', { className: 'notice error', textContent: err.message || String(err) }));
     }
-  }));
+  }
+
+  mount.appendChild(formCard([
+    field('cluster', clusterSel),
+    field('stream', streamSel),
+    field('namespace', namespaceInput),
+    field('name', nameInput),
+    field('since (hours)', sinceInput),
+  ], 'show timeline', run));
   mount.appendChild(results);
+
+  run();
 }
 
 function renderHistory(results, data) {

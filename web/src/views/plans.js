@@ -1,13 +1,19 @@
 // Replay plans: create (POST /v1/replay-plans), review objects/exclusions, dry-run.
 import { api } from '../api.js';
 import { el, asList, simpleTable, badge, fmtTime, field, formCard } from '../util.js';
+import { pickFirst, pickLatestSnapshot, pickNamespace, setSelect } from '../defaults.js';
 
 export async function viewPlans(mount) {
   mount.appendChild(el('h1', { textContent: 'Replay plans' }));
 
-  const [clusters, snaps] = await Promise.all([api.clusters().catch(() => []), api.snapshots().catch(() => [])]);
+  const [clusters, snaps, streams] = await Promise.all([
+    api.clusters().catch(() => []),
+    api.snapshots().catch(() => []),
+    api.streams().catch(() => []),
+  ]);
   const clusterList = asList(clusters);
   const snapshotList = asList(snaps);
+  const streamList = asList(streams);
 
   const clusterSel = el('select');
   clusterSel.appendChild(el('option', { value: '', textContent: '— cluster —' }));
@@ -29,13 +35,39 @@ export async function viewPlans(mount) {
   const sourceInput = el('input', { type: 'text', placeholder: 'source namespace' });
   const targetInput = el('input', { type: 'text', placeholder: 'target namespace' });
   const list = el('div', { className: 'plan-list' });
+  let bootstrapped = false;
+
+  const defCluster = pickFirst(clusterList);
+  const defSnapshot = pickLatestSnapshot(snapshotList);
+  const defNs = pickNamespace(streamList);
+  if (defCluster) setSelect(clusterSel, defCluster.id);
+  fillSnapshots();
+  if (defSnapshot && (!clusterSel.value || defSnapshot.cluster_id === clusterSel.value)) snapshotSel.value = defSnapshot.id;
+  if (defNs) {
+    sourceInput.value = defNs;
+    targetInput.value = defNs ? `${defNs}-copy` : '';
+  }
+
+  async function create(body) {
+    list.textContent = '';
+    list.appendChild(el('p', { className: 'muted', textContent: 'creating plan…' }));
+    try {
+      const plan = await api.createPlan(body);
+      list.textContent = '';
+      if (plan && plan.id) list.appendChild(planCard(plan));
+      await load();
+    } catch (err) {
+      list.textContent = '';
+      list.appendChild(el('div', { className: 'notice error', textContent: err.message || String(err) }));
+    }
+  }
 
   mount.appendChild(formCard([
     field('cluster', clusterSel),
     field('snapshot', snapshotSel),
     field('source namespace', sourceInput),
     field('target namespace', targetInput),
-  ], 'create plan', async () => {
+  ], 'create plan', () => {
     list.textContent = '';
     const body = {
       cluster_id: clusterSel.value,
@@ -47,16 +79,7 @@ export async function viewPlans(mount) {
       list.appendChild(el('div', { className: 'notice warn', textContent: 'cluster, snapshot, source and target namespace are required.' }));
       return;
     }
-    list.appendChild(el('p', { className: 'muted', textContent: 'creating plan…' }));
-    try {
-      const plan = await api.createPlan(body);
-      list.textContent = '';
-      if (plan && plan.id) list.appendChild(planCard(plan));
-      await load();
-    } catch (err) {
-      list.textContent = '';
-      list.appendChild(el('div', { className: 'notice error', textContent: err.message || String(err) }));
-    }
+    create(body);
   }));
   mount.appendChild(list);
 
@@ -68,6 +91,7 @@ export async function viewPlans(mount) {
       list.textContent = '';
       if (!plans.length) {
         list.appendChild(el('p', { className: 'muted', textContent: 'No plans yet — create one above.' }));
+        bootstrapIfEmpty();
         return;
       }
       for (const p of plans) list.appendChild(planCard(p));
@@ -77,6 +101,23 @@ export async function viewPlans(mount) {
     }
   }
   await load();
+
+  // Demo bootstrap: with a real cluster + snapshot, auto-create one plan so a
+  // visitor sees a populated page without filling the form.
+  async function bootstrapIfEmpty() {
+    if (bootstrapped) return;
+    bootstrapped = true;
+    const body = {
+      cluster_id: clusterSel.value,
+      snapshot_id: snapshotSel.value,
+      source_namespace: sourceInput.value.trim(),
+      target_namespace: targetInput.value.trim(),
+    };
+    if (!body.cluster_id || !body.snapshot_id || !body.source_namespace || !body.target_namespace) return;
+    const plans = asList(await api.plans().catch(() => []));
+    if (plans.length) return;
+    create(body);
+  }
 }
 
 const itemName = (x) => (x.namespace ? `${x.namespace}/${x.name}` : x.name);

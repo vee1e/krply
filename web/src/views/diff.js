@@ -4,6 +4,7 @@
 // list every path with added/removed/modified badges.
 import { api } from '../api.js';
 import { el, asList, badge, fmtTime, field, formCard } from '../util.js';
+import { pickFirst, pickNamespace, setSelect } from '../defaults.js';
 
 const toLocalInput = (d) => {
   const p = (n) => String(n).padStart(2, '0');
@@ -12,7 +13,9 @@ const toLocalInput = (d) => {
 
 export async function viewDiff(mount) {
   mount.appendChild(el('h1', { textContent: 'JSON diff' }));
-  const clusters = asList(await api.clusters().catch(() => []));
+  const [c, s] = await Promise.all([api.clusters().catch(() => []), api.streams().catch(() => [])]);
+  const clusters = asList(c);
+  const streams = asList(s);
 
   const clusterSel = el('select');
   clusterSel.appendChild(el('option', { value: '', textContent: '— cluster —' }));
@@ -22,13 +25,14 @@ export async function viewDiff(mount) {
   const sinceInput = el('input', { type: 'datetime-local', step: '1', value: toLocalInput(new Date(Date.now() - 3600e3)) });
   const untilInput = el('input', { type: 'datetime-local', step: '1', value: toLocalInput(new Date()) });
 
+  const defCluster = pickFirst(clusters);
+  const defNs = pickNamespace(streams);
+  if (defCluster) setSelect(clusterSel, defCluster.id);
+  if (defNs) namespaceInput.value = defNs;
+
   const results = el('div');
-  mount.appendChild(formCard([
-    field('cluster', clusterSel),
-    field('namespace', namespaceInput),
-    field('before (observed)', sinceInput),
-    field('after (observed)', untilInput),
-  ], 'show diff', async () => {
+
+  async function run() {
     results.textContent = '';
     if (!clusterSel.value || !namespaceInput.value.trim() || !sinceInput.value || !untilInput.value) {
       results.appendChild(el('div', { className: 'notice warn', textContent: 'cluster, namespace, before and after are required.' }));
@@ -49,8 +53,17 @@ export async function viewDiff(mount) {
       results.textContent = '';
       results.appendChild(el('div', { className: 'notice error', textContent: err.message || String(err) }));
     }
-  }));
+  }
+
+  mount.appendChild(formCard([
+    field('cluster', clusterSel),
+    field('namespace', namespaceInput),
+    field('before (observed)', sinceInput),
+    field('after (observed)', untilInput),
+  ], 'show diff', run));
   mount.appendChild(results);
+
+  run();
 }
 
 function renderDiff(results, data) {
