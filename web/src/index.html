@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>krply · gap-aware Kubernetes history</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/coverage">
+      <i class="brand-mark" aria-hidden="true"></i>
+      <span class="brand-word">krply</span>
+    </a>
+    <nav id="nav" class="nav" aria-label="sections"></nav>
+    <div class="spacer"></div>
+    <form id="server-form" class="server" autocomplete="off">
+      <input id="server-input" type="text" placeholder="server url" aria-label="server url" spellcheck="false">
+      <button type="submit">set</button>
+    </form>
+    <span id="health" class="health" title="server health"></span>
+  </header>
+
+  <main id="view" class="view" tabindex="-1"></main>
+
+  <footer class="footer">
+    <span class="foot-legend">
+      <span><i class="sq ok"></i>events</span>
+      <span><i class="sq degraded"></i>gap</span>
+      <span><i class="sq idle"></i>idle</span>
+      <span><i class="sq void"></i>outside window</span>
+    </span>
+    <span id="foot-server" class="foot-server"></span>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

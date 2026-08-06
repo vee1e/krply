@@ -1,0 +1,11 @@
+{
+  "name": "krply-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-light static UI for krply-server",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node build.mjs && npx serve dist"
+  }
+}
