@@ -6,7 +6,13 @@
 const LS_KEY = 'krply.server';
 const fromURL = new URLSearchParams(location.search).get('server');
 
-let base = (fromURL || localStorage.getItem(LS_KEY) || '').replace(/\/+$/, '');
+const PROD_HOSTS = new Set([
+  'krply.lverma.com',
+  'krply-web-lakshit-vermas-projects.vercel.app',
+]);
+const DEFAULT_SERVER = PROD_HOSTS.has(location.hostname) ? 'https://krply-server.onrender.com' : '';
+
+let base = (fromURL || localStorage.getItem(LS_KEY) || DEFAULT_SERVER).replace(/\/+$/, '');
 
 export function serverURL() { return base; }
 
