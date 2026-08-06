@@ -42,6 +42,8 @@ type Server struct {
 	planMu    sync.RWMutex
 	plans     map[string]*replay.Plan
 	planTimes map[string]time.Time
+
+	corsOrigins []string
 }
 
 // NewServer wires a Server onto the given store, materializer, planner, and
@@ -65,16 +67,52 @@ func NewServer(store storage.Store, mat *materialize.Materializer, planner *repl
 	if fi, err := os.Stat("web/dist"); err == nil && fi.IsDir() {
 		static = os.DirFS("web/dist")
 	}
+	origins := strings.Split(os.Getenv("KRPLY_CORS_ORIGINS"), ",")
+	if len(origins) == 1 && origins[0] == "" {
+		origins = []string{"*"}
+	}
 	return &Server{
-		store:     store,
-		mat:       mat,
-		planner:   planner,
-		metrics:   m,
-		version:   version,
-		static:    static,
-		plans:     map[string]*replay.Plan{},
-		planTimes: map[string]time.Time{},
+		store:       store,
+		mat:         mat,
+		planner:     planner,
+		metrics:     m,
+		version:     version,
+		static:      static,
+		plans:       map[string]*replay.Plan{},
+		planTimes:   map[string]time.Time{},
+		corsOrigins: origins,
 	}, nil
+}
+
+// cors wraps the mux with CORS headers so the static web UI can query the API
+// from a different origin. Origins are allowed when they match KRPLY_CORS_ORIGINS
+// (comma-separated, "*" for any). Preflight OPTIONS requests are short-circuited.
+func (s *Server) cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if s.allowsOrigin(origin) {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
+				w.Header().Set("Vary", "Origin")
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) allowsOrigin(origin string) bool {
+	for _, o := range s.corsOrigins {
+		if o == "*" || o == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // Handler returns the HTTP handler with all routes registered.
@@ -95,7 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/replay-runs", s.handleReplayRun)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("/", s.handleStatic)
-	return mux
+	return s.cors(mux)
 }
 
 // planByID returns the registered plan and whether it exists.

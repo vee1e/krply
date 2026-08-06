@@ -42,6 +42,17 @@ func run() error {
 		return nil
 	}
 
+	listenAddr := *listen
+	listenFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			listenFlagSet = true
+		}
+	})
+	if !listenFlagSet && os.Getenv("PORT") != "" {
+		listenAddr = ":" + os.Getenv("PORT")
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -64,11 +75,11 @@ func run() error {
 		return fmt.Errorf("build api server: %w", err)
 	}
 
-	httpSrv := &http.Server{Addr: *listen, Handler: srv.Handler()}
+	httpSrv := &http.Server{Addr: listenAddr, Handler: srv.Handler()}
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("krply-server listening", "addr", *listen, "store", *storePath, "version", version)
+		slog.Info("krply-server listening", "addr", listenAddr, "store", *storePath, "version", version)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

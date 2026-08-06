@@ -181,6 +181,38 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestCORS(t *testing.T) {
+	ts := newTestServer(t, storage.NewInMemory())
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Origin", "https://krply.lverma.com")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	defer res.Body.Close()
+	if got := res.Header.Get("Access-Control-Allow-Origin"); got != "https://krply.lverma.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want origin echoed", got)
+	}
+
+	pre, err := http.NewRequest(http.MethodOptions, ts.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatalf("new preflight request: %v", err)
+	}
+	pre.Header.Set("Origin", "https://krply.lverma.com")
+	pres, err := http.DefaultClient.Do(pre)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	defer pres.Body.Close()
+	if pres.StatusCode != http.StatusNoContent {
+		t.Errorf("preflight status = %d, want 204", pres.StatusCode)
+	}
+}
+
 func TestClusters(t *testing.T) {
 	ts := newTestServer(t, seedStore(t))
 	var clusters []queryv1.Cluster
