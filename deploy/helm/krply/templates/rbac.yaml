@@ -1,0 +1,38 @@
+# Recorder RBAC for the krply-server ServiceAccount.
+#
+# Read-only: get/list/watch on the exact resources krply captures. No Secrets,
+# no wildcards, no write verbs. Mirrors deploy/rbac/recorder-clusterrole.yaml.
+# Disable with --set rbac.create=false if you bind an existing role instead.
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "krply.fullname" . }}-recorder
+  labels:
+    {{- include "krply.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "configmaps", "services", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "krply.fullname" . }}-recorder
+  labels:
+    {{- include "krply.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "krply.fullname" . }}-recorder
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "krply.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

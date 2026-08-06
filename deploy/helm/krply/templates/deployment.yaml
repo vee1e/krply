@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "krply.fullname" . }}
+  labels:
+    {{- include "krply.labels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "krply.fullname" . }}
+  labels:
+    {{- include "krply.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "krply.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "krply.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "krply.fullname" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --store
+            - {{ .Values.store.path | quote }}
+            - --listen
+            - ":{{ .Values.listen.port }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.listen.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: store
+              mountPath: {{ .Values.store.path | dir }}
+      volumes:
+        - name: store
+          {{- if .Values.store.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "krply.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.store.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "krply.fullname" . }}
+  labels:
+    {{- include "krply.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.store.persistence.storageClass }}
+  storageClassName: {{ .Values.store.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.store.persistence.size }}
+{{- end }}

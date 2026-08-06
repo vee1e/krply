@@ -1,0 +1,6 @@
+apiVersion: v2
+name: krply
+description: Gap-aware Kubernetes object history and replay planner (krply-server)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

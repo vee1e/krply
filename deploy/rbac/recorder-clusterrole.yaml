@@ -1,0 +1,44 @@
+# Recorder ClusterRole: read-only access for the krply recorder identity.
+#
+# The recorder only lists, watches, and reads the specific resources krply
+# captures. It has NO write verbs, NO Secrets access, and no wildcards. Follow
+# the same shape when extending: name exact groups/resources, never "*".
+#
+# NOTE: ConfigMaps and their annotations can still contain sensitive material.
+# Recording ConfigMaps is on by default (they are an MVP replay root), so
+# review what is stored and where the journal lives.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: krply-recorder
+  labels:
+    app.kubernetes.io/name: krply
+    app.kubernetes.io/component: recorder
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "configmaps", "services", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: krply-recorder
+  labels:
+    app.kubernetes.io/name: krply
+    app.kubernetes.io/component: recorder
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: krply-recorder
+subjects:
+  # Replace with the ServiceAccount that runs the recorder agent in your
+  # cluster (e.g. kubectl create serviceaccount krply-recorder -n krply).
+  - kind: ServiceAccount
+    name: krply-recorder
+    namespace: krply

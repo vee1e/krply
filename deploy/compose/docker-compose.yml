@@ -1,0 +1,40 @@
+# krply compose stack.
+#
+# README:
+#   - krply-server: runs the query API + materializer. It stores the SQLite
+#     journal in ./data (bind-mounted to /data). The image is a placeholder;
+#     the server also builds from ../../ via the `build` block.
+#   - krply-agent (commented out): runs `krply record` inside or near your
+#     cluster and ships events to the same journal volume or to a server's
+#     ingest endpoint. It needs a kubeconfig mounted read-only.
+#   - The recorder identity is read-only (see ../../rbac). Do not mount a
+#     kubeconfig with write access.
+services:
+  krply-server:
+    image: ghcr.io/krply/krply-server:dev
+    build:
+      context: ../..
+    container_name: krply-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    command: ["--store", "/data/krply.db", "--listen", ":8080"]
+    restart: unless-stopped
+
+  # Optional agent: capture watch events from a cluster.
+  #   - Point KUBECONFIG at a read-only kubeconfig for the recorder identity.
+  #   - Records into the same /data volume so the server can query them.
+  #   - The exact `record` flags depend on the krply CLI release.
+  # krply-agent:
+  #   image: ghcr.io/krply/krply:dev
+  #   container_name: krply-agent
+  #   depends_on:
+  #     - krply-server
+  #   volumes:
+  #     - ./data:/data
+  #     - ~/.kube/krply-recorder.yaml:/kubeconfig:ro
+  #   environment:
+  #     KUBECONFIG: /kubeconfig
+  #   command: ["record", "--store", "/data/krply.db"]
+  #   restart: unless-stopped

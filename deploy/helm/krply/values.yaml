@@ -1,0 +1,45 @@
+# krply-server Helm values.
+
+image:
+  repository: ghcr.io/krply/krply-server
+  tag: dev
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+store:
+  path: /data/krply.db
+  # PersistentVolumeClaim to back the store path. If empty, an emptyDir is used.
+  persistence:
+    enabled: false
+    storageClass: ""
+    size: 10Gi
+
+listen:
+  port: 8080
+
+service:
+  type: ClusterIP
+  port: 8080
+
+# Create a recorder ClusterRole/Binding for the service account. See
+# deploy/rbac/recorder-clusterrole.yaml for the full reference role.
+rbac:
+  create: true
+
+replicaCount: 1
+
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # limits:
+  #   cpu: 500m
+  #   memory: 512Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

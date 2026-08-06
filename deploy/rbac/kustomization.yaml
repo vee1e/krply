@@ -1,0 +1,14 @@
+# kustomization for krply RBAC.
+#
+# Two identities, deliberately narrow:
+#   - recorder-clusterrole: read-only watch access used by `krply record`.
+#   - replay-clusterrole: create/patch-only access used by `krply replay apply`
+#     against a disposable target cluster. Never use it against production.
+#
+# Neither role grants secrets, wildcards, or cluster-admin.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - recorder-clusterrole.yaml
+  - replay-clusterrole.yaml
