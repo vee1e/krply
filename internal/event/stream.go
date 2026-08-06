@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -20,6 +21,8 @@ type Stream struct {
 
 // ID returns the stable stream identifier used across the journal.
 // Format: cluster/group/version/resource/namespace/selector
+// The selector is URL-escaped because label selectors legitimately contain '/'
+// (prefix/name label keys) which would otherwise make the ID ambiguous.
 func (s Stream) ID() string {
 	var b strings.Builder
 	b.WriteString(s.ClusterID)
@@ -32,7 +35,7 @@ func (s Stream) ID() string {
 	b.WriteByte('/')
 	b.WriteString(s.Namespace)
 	b.WriteByte('/')
-	b.WriteString(s.Selector)
+	b.WriteString(url.PathEscape(s.Selector))
 	return b.String()
 }
 
@@ -42,13 +45,17 @@ func StreamID(id string) (Stream, error) {
 	if len(parts) != 6 {
 		return Stream{}, fmt.Errorf("stream id %q: want 6 slash-separated parts", id)
 	}
+	selector, err := url.PathUnescape(parts[5])
+	if err != nil {
+		return Stream{}, fmt.Errorf("stream id %q: invalid selector: %w", id, err)
+	}
 	return Stream{
 		ClusterID: parts[0],
 		Group:     parts[1],
 		Version:   parts[2],
 		Resource:  parts[3],
 		Namespace: parts[4],
-		Selector:  parts[5],
+		Selector:  selector,
 	}, nil
 }
 
@@ -59,13 +66,17 @@ func (s Stream) GVR() (string, string, string) {
 
 // EventID derives a deterministic deduplication key for a watch event.
 // The same underlying API event must always produce the same key, so a
-// duplicate delivery after a reconnect is idempotent.
+// duplicate delivery after a reconnect is idempotent. For live events
+// observedAt is zero and excluded. Collector-generated synthetic baselines
+// pass a non-zero observedAt so each relist produces a distinct key: an
+// unchanged object re-listed after a gap is a new observation, not a
+// duplicate delivery, and must survive deduplication.
 func EventID(stream Stream, resource ResourceRef, watchType WatchType, observedAt int64) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", stream.ID(), resource.Namespace, resource.Name, resource.UID, resource.ResourceVersion, string(watchType))
-	// observedAt is deliberately excluded: resource version ordering is the
-	// dedup domain, not wall-clock observation time.
-	_ = observedAt
+	if observedAt != 0 {
+		fmt.Fprintf(h, "\x00%d", observedAt)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

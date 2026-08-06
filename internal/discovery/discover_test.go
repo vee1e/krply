@@ -89,6 +89,7 @@ func TestResolveAliases(t *testing.T) {
 		{Resource: "svc"},
 		{Resource: "ns"},
 		{Resource: "rc"},
+		{Resource: "rs"},
 	}
 	resolved, err := Resolve(context.Background(), cli, inputs)
 	if err != nil {
@@ -102,7 +103,8 @@ func TestResolveAliases(t *testing.T) {
 		{"pods", "", "Pod"},
 		{"services", "", "Service"},
 		{"namespaces", "", "Namespace"},
-		{"runtimeclasses", "node.k8s.io", "RuntimeClass"},
+		{"replicationcontrollers", "", "ReplicationController"},
+		{"replicasets", "apps", "ReplicaSet"},
 	}
 	for i, w := range want {
 		got := resolved[i]
@@ -129,5 +131,19 @@ func TestResolvePartialWithKnownVersion(t *testing.T) {
 	}
 	if s.Namespace != "" {
 		t.Errorf("deployments should be namespaced with empty namespace filter, got %q", s.Namespace)
+	}
+}
+
+func TestResolveKeepsExplicitGroup(t *testing.T) {
+	cli := newFakeClient()
+	resolved, err := Resolve(context.Background(), cli, []ResourceSpec{
+		{APIGroup: "acme.io", Version: "v1", Resource: "pods", Kind: "AcmePod"},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	s := resolved[0]
+	if s.APIGroup != "acme.io" || s.Kind != "AcmePod" || s.Resource != "pods" {
+		t.Errorf("alias clobbered explicit spec: %+v", s)
 	}
 }

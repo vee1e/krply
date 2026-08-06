@@ -173,8 +173,8 @@ func TestPlanSanitizesAndExcludes(t *testing.T) {
 	if !plan.CoverageComplete {
 		t.Fatalf("CoverageComplete = false, want true")
 	}
-	if plan.ID == "" || plan.FieldManager != "krply-plan-"+plan.ID {
-		t.Fatalf("ID = %q, FieldManager = %q, want krply-plan-<id>", plan.ID, plan.FieldManager)
+	if plan.ID == "" || plan.FieldManager != "krply-"+plan.ID {
+		t.Fatalf("ID = %q, FieldManager = %q, want krply-<id>", plan.ID, plan.FieldManager)
 	}
 	if len(plan.Objects) != 1 {
 		t.Fatalf("objects = %d, want 1: %+v", len(plan.Objects), plan.Objects)

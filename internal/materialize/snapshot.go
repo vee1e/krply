@@ -7,25 +7,34 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/krply/krply/internal/event"
 	"github.com/krply/krply/internal/storage"
 )
 
 // Snapshot is a materialized view of a cluster at a point in time.
 type Snapshot struct {
-	ID        string
-	ClusterID string
-	Name      string
-	At        time.Time
-	Objects   []ObjectState
-	Streams   []string
-	Complete  bool
-	Missing   []string
-	Warning   string
+	ID          string
+	ClusterID   string
+	Name        string
+	At          time.Time
+	Objects     []ObjectState
+	Streams     []string
+	Watermarks  []StreamWatermark
+	Complete    bool
+	Missing     []string
+	Warning     string
+}
+
+// StreamWatermark is the durable boundary of one stream at snapshot time.
+type StreamWatermark struct {
+	StreamID            string
+	LastObservedAt      time.Time
+	LastResourceVersion string
 }
 
 // Snapshot materializes every watched object of the cluster at at, records
-// per-stream coverage, and persists the snapshot metadata. The materialized
-// objects are reconstructable on demand; the snapshot reference is durable.
+// per-stream coverage and watermarks, persists a TypeSnapshot journal entry,
+// and stores the snapshot metadata.
 func (m *Materializer) Snapshot(ctx context.Context, clusterID string, at time.Time, name string) (*Snapshot, error) {
 	streams, err := m.store.Streams(ctx)
 	if err != nil {
@@ -51,6 +60,11 @@ func (m *Materializer) Snapshot(ctx context.Context, clusterID string, at time.T
 		}
 		snap.Objects = append(snap.Objects, ss.Objects...)
 		snap.Streams = append(snap.Streams, s.StreamID)
+		snap.Watermarks = append(snap.Watermarks, StreamWatermark{
+			StreamID:            s.StreamID,
+			LastObservedAt:      ss.LastObservedAt,
+			LastResourceVersion: ss.LastResourceVersion,
+		})
 
 		if !ss.HasBaseline || ss.HasGaps {
 			missing = append(missing, s.StreamID)
@@ -59,6 +73,7 @@ func (m *Materializer) Snapshot(ctx context.Context, clusterID string, at time.T
 
 	sort.Strings(snap.Streams)
 	sortObjects(snap.Objects)
+	sort.Slice(snap.Watermarks, func(i, j int) bool { return snap.Watermarks[i].StreamID < snap.Watermarks[j].StreamID })
 	sort.Strings(missing)
 
 	if len(missing) > 0 {
@@ -72,6 +87,17 @@ func (m *Materializer) Snapshot(ctx context.Context, clusterID string, at time.T
 		ClusterID: clusterID,
 		Name:      name,
 		At:        at,
+	}); err != nil {
+		return nil, err
+	}
+
+	// Persist a TypeSnapshot journal record so the snapshot is reconstructable
+	// and provable from the event stream, not only from the metadata table.
+	if _, err := m.store.Append(ctx, &event.Record{
+		ClusterID:  clusterID,
+		ObservedAt: at,
+		Type:       event.TypeSnapshot,
+		Snapshot:   &event.SnapshotInfo{Name: name},
 	}); err != nil {
 		return nil, err
 	}

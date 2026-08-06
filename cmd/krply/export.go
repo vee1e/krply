@@ -57,7 +57,9 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	var w io.Writer = os.Stdout
 	if exportOut != "" {
-		fh, err := os.Create(exportOut)
+		// Journal exports can contain recorded ConfigMaps/Secrets, so the file
+		// is created with owner-only permissions.
+		fh, err := os.OpenFile(exportOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err != nil {
 			return err
 		}

@@ -120,7 +120,6 @@ var clusterScopedKinds = map[string]bool{
 	"ValidatingWebhookConfiguration": true,
 	"PriorityClass":                  true,
 	"Node":                           true,
-	"PersistentVolumeClaim":          true,
 }
 
 // applyRecordNamespace scopes each namespaced resource to the requested

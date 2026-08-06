@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -30,7 +31,7 @@ type sqliteStore struct {
 func NewSQLiteStore(path string) (Store, error) {
 	dsn := ":memory:"
 	if path != ":memory:" {
-		dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+		dsn = "file:" + (&url.URL{Path: path}).EscapedPath() + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -78,11 +79,6 @@ const (
 	dedupIndexDDL = `CREATE UNIQUE INDEX IF NOT EXISTS idx_records_dedup
 		ON records (cluster_id, stream_id, event_id) WHERE event_id <> ''`
 
-	// dedupIndexDrop removes a pre-migration index that was not partial. A
-	// unique index over empty event_id would collapse all special records on a
-	// stream (baselines, gaps, checkpoints) into one row.
-	dedupIndexDrop = `DROP INDEX IF EXISTS idx_records_dedup`
-
 	lookupIndexDDL = `CREATE INDEX IF NOT EXISTS idx_records_lookup
 		ON records (cluster_id, stream_id, observed_at, namespace, name)`
 
@@ -112,8 +108,29 @@ const (
 )
 
 func (s *sqliteStore) init(ctx context.Context) error {
-	for _, ddl := range []string{recordsDDL, dedupIndexDrop, dedupIndexDDL, lookupIndexDDL, streamsDDL, snapshotsDDL} {
+	for _, ddl := range []string{recordsDDL, dedupIndexDDL, lookupIndexDDL, streamsDDL, snapshotsDDL} {
 		if _, err := s.db.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	// migrateTimeColumns normalizes timestamps written before the fixed-width
+	// format to the same shape so lexicographic comparisons stay chronological.
+	var userVersion int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return err
+	}
+	if userVersion < 1 {
+		for _, q := range []string{
+			`UPDATE records SET observed_at = strftime('%Y-%m-%dT%H:%M:%fZ', observed_at) WHERE observed_at <> ''`,
+			`UPDATE streams SET first_observed_at = strftime('%Y-%m-%dT%H:%M:%fZ', first_observed_at) WHERE first_observed_at <> ''`,
+			`UPDATE streams SET last_observed_at = strftime('%Y-%m-%dT%H:%M:%fZ', last_observed_at) WHERE last_observed_at <> ''`,
+			`UPDATE snapshots SET at = strftime('%Y-%m-%dT%H:%M:%fZ', at) WHERE at <> ''`,
+		} {
+			if _, err := s.db.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
 			return err
 		}
 	}
@@ -142,6 +159,7 @@ func (s *sqliteStore) Append(ctx context.Context, rec *event.Record) (int64, err
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
+		tx.Rollback()
 		return 0, err
 	}
 	return seq, nil
@@ -164,6 +182,7 @@ func (s *sqliteStore) Appends(ctx context.Context, recs []*event.Record) ([]int6
 		seqs = append(seqs, seq)
 	}
 	if err := tx.Commit(); err != nil {
+		tx.Rollback()
 		return nil, err
 	}
 	return seqs, nil
@@ -228,8 +247,10 @@ func (s *sqliteStore) appendRecord(ctx context.Context, tx *sql.Tx, rec *event.R
 		if err := tx.QueryRowContext(ctx, `SELECT last_insert_rowid()`).Scan(&seq); err != nil {
 			return 0, err
 		}
-		if err := s.upsertMeta(ctx, tx, rec, observedAt); err != nil {
-			return 0, err
+		if rec.StreamID != "" {
+			if err := s.upsertMeta(ctx, tx, rec, observedAt); err != nil {
+				return 0, err
+			}
 		}
 	} else {
 		// Duplicate event_id delivery: re-return the existing ingest sequence.
@@ -280,6 +301,7 @@ func (s *sqliteStore) upsertMeta(ctx context.Context, tx *sql.Tx, rec *event.Rec
 		if rec.Coverage != nil {
 			if rec.Coverage.Current.Available {
 				available = 1
+				degraded = 0
 			} else {
 				available = 0
 				degraded = 1
@@ -409,6 +431,10 @@ func (s *sqliteStore) Events(ctx context.Context, f EventFilter) ([]event.Record
 	if !f.Until.IsZero() {
 		q += " AND observed_at<=?"
 		args = append(args, formatTime(f.Until))
+	}
+	if f.SinceSeq > 0 {
+		q += " AND ingest_seq>?"
+		args = append(args, f.SinceSeq)
 	}
 	q += " ORDER BY ingest_seq ASC"
 	if f.Limit > 0 {
@@ -545,7 +571,7 @@ func (s *sqliteStore) SaveSnapshot(ctx context.Context, snap *SnapshotRef) error
 	defer s.mu.Unlock()
 	cp := *snap
 	if cp.ID == "" {
-		cp.ID = "snap-" + time.Now().UTC().Format("20060102T150405")
+		cp.ID = "snap-" + time.Now().UTC().Format("20060102T150405.000000000")
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO snapshots (id, cluster_id, name, at)
 		VALUES (?,?,?,?)
@@ -577,7 +603,11 @@ func (s *sqliteStore) Snapshots(ctx context.Context) ([]SnapshotRef, error) {
 	return out, rows.Err()
 }
 
-func (s *sqliteStore) Close() error { return s.db.Close() }
+func (s *sqliteStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Close()
+}
 
 // scanFunc matches both *sql.Rows.Scan and *sql.Row.Scan.
 type scanFunc func(dest ...any) error
@@ -652,11 +682,15 @@ func scanStreamMeta(scan scanFunc) (StreamMeta, error) {
 	return m, nil
 }
 
+// formatTime renders t as a fixed-width UTC timestamp. Variable-width RFC3339
+// output breaks lexicographic string comparisons at sub-second boundaries, so
+// the fraction is always padded to milliseconds and the zone is always "Z".
+// All comparisons against observed_at use this exact shape.
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.UTC().Format(time.RFC3339Nano)
+	return t.UTC().Format("2006-01-02T15:04:05.000") + "Z"
 }
 
 func parseTime(s string) (time.Time, error) {

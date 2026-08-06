@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,12 +66,22 @@ func (c *Collector) runStream(ctx context.Context, spec discovery.ResourceSpec) 
 				}
 				continue
 			}
+			if rv == "" {
+				// A relist without a resource version would restart the watch
+				// from an arbitrary point and loop forever.
+				log.Warn("list returned an empty resourceVersion; backing off and relisting")
+				if err := c.sleepBackoff(ctx, &backoff); err != nil {
+					return nil
+				}
+				continue
+			}
 			lastRV = rv
 			backoff = c.cfg.MinBackoff
 		}
 
 		w, err := ri.Watch(ctx, metav1.ListOptions{
 			ResourceVersion:     lastRV,
+			LabelSelector:       c.cfg.Selector,
 			AllowWatchBookmarks: c.cfg.Bookmarks,
 		})
 		if err != nil {
@@ -83,6 +94,9 @@ func (c *Collector) runStream(ctx context.Context, spec discovery.ResourceSpec) 
 			}
 			continue
 		}
+		if m := c.cfg.Metrics; m != nil {
+			m.Reconnects.WithLabelValues(sid).Inc()
+		}
 
 		err = c.drainWatch(ctx, stream, sid, spec, w, &lastRV)
 		w.Stop()
@@ -93,9 +107,14 @@ func (c *Collector) runStream(ctx context.Context, spec discovery.ResourceSpec) 
 			return err
 		}
 		if errors.Is(err, errGone) {
-			log.Warn("410 Gone received; relisting")
+			// Persistent 410s (aggressive etcd compaction, flaky aggregated
+			// servers) would otherwise hammer the apiserver with an unthrottled
+			// list/watch/gap loop.
+			log.Warn("410 Gone received; relisting after backoff")
 			lastRV = ""
-			backoff = c.cfg.MinBackoff
+			if err := c.sleepBackoff(ctx, &backoff); err != nil {
+				return nil
+			}
 			continue
 		}
 		log.Warn("watch stream ended; reconnecting from last durable RV", "error", err)
@@ -109,7 +128,7 @@ func (c *Collector) runStream(ctx context.Context, spec discovery.ResourceSpec) 
 // synthetic ADDED record per item, and returns the collection resource version
 // to watch from.
 func (c *Collector) listAndBaseline(ctx context.Context, stream event.Stream, sid string, spec discovery.ResourceSpec, ri dynamic.ResourceInterface) (string, error) {
-	list, err := ri.List(ctx, metav1.ListOptions{ResourceVersion: "0"})
+	list, err := ri.List(ctx, metav1.ListOptions{ResourceVersion: "0", LabelSelector: c.cfg.Selector})
 	if err != nil {
 		return "", err
 	}
@@ -141,7 +160,7 @@ func (c *Collector) listAndBaseline(ctx context.Context, stream event.Stream, si
 			ClusterID:  c.cfg.ClusterID,
 			StreamID:   sid,
 			Type:       event.TypeEvent,
-			EventID:    event.EventID(stream, ref, event.WatchAdded, 0),
+			EventID:    event.EventID(stream, ref, event.WatchAdded, now.UnixNano()),
 			ObservedAt: now,
 			WatchType:  event.WatchAdded,
 			Synthetic:  true,
@@ -158,16 +177,37 @@ func (c *Collector) listAndBaseline(ctx context.Context, stream event.Stream, si
 
 // drainWatch consumes a watch stream, persisting every event. It returns nil
 // when the context is cancelled, errGone on 410 (gap already recorded),
-// errReconnect on other errors (gap already recorded), errStore on a store
-// failure, or a plain error when the channel closes.
+// errReconnect on other errors, errStore on a store failure, or a plain error
+// when the channel closes. Only a 410 loses data; every other teardown resumes
+// from the last durable resource version, so no gap is recorded for them.
 func (c *Collector) drainWatch(ctx context.Context, stream event.Stream, sid string, spec discovery.ResourceSpec, w watch.Interface, lastRV *string) error {
+	var idle *time.Timer
+	var idleC <-chan time.Time
+	if c.cfg.WatchIdleTimeout > 0 {
+		idle = time.NewTimer(c.cfg.WatchIdleTimeout)
+		defer idle.Stop()
+		idleC = idle.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-idleC:
+			// No event (and no bookmark) for a full idle window: the connection
+			// is likely dead without a close. Force a reconnect so recording
+			// does not stall silently.
+			return errReconnect
 		case ev, ok := <-w.ResultChan():
 			if !ok {
 				return errors.New("watch channel closed")
+			}
+			if idle != nil {
+				if !idle.Reset(c.cfg.WatchIdleTimeout) {
+					select {
+					case <-idle.C:
+					default:
+					}
+				}
 			}
 			switch ev.Type {
 			case watch.Added, watch.Modified, watch.Deleted:
@@ -182,6 +222,10 @@ func (c *Collector) drainWatch(ctx context.Context, stream event.Stream, sid str
 				if _, err := c.cfg.Store.Append(ctx, rec); err != nil {
 					return storeErrf("append watch event: %v", err)
 				}
+				if m := c.cfg.Metrics; m != nil {
+					m.EventsIngested.WithLabelValues(sid).Inc()
+					m.IngestLag.Set(time.Since(rec.ObservedAt).Seconds())
+				}
 				if rec.Resource.ResourceVersion != "" {
 					*lastRV = rec.Resource.ResourceVersion
 				}
@@ -189,6 +233,9 @@ func (c *Collector) drainWatch(ctx context.Context, stream event.Stream, sid str
 			case watch.Bookmark:
 				rv := objRV(ev.Object)
 				if rv == "" {
+					continue
+				}
+				if *lastRV != "" && resourceVersionBefore(rv, *lastRV) {
 					continue
 				}
 				now := time.Now().UTC()
@@ -219,19 +266,31 @@ func (c *Collector) drainWatch(ctx context.Context, stream event.Stream, sid str
 					if err := c.writeGap(ctx, sid, spec, *lastRV, "", "410 Gone"); err != nil {
 						return err
 					}
+					if m := c.cfg.Metrics; m != nil {
+						m.Gone410.WithLabelValues(sid).Inc()
+					}
 					return errGone
 				}
 				reason := "watch error"
 				if st := statusOf(ev.Object); st != nil && st.Message != "" {
 					reason = st.Message
 				}
-				if err := c.writeGap(ctx, sid, spec, *lastRV, "", reason); err != nil {
-					return err
-				}
+				c.cfg.Log.Warn("watch error (not a gap); reconnecting from last durable RV", "reason", reason)
 				return errReconnect
 			}
 		}
 	}
+}
+
+// resourceVersionBefore reports whether a < b when both parse as integers.
+// Non-numeric resource versions are opaque and treated as incomparable.
+func resourceVersionBefore(a, b string) bool {
+	ai, aerr := strconv.ParseInt(a, 10, 64)
+	bi, berr := strconv.ParseInt(b, 10, 64)
+	if aerr != nil || berr != nil {
+		return false
+	}
+	return ai < bi
 }
 
 func (c *Collector) watchEventRecord(stream event.Stream, sid string, spec discovery.ResourceSpec, wt event.WatchType, obj *unstructured.Unstructured, synthetic bool) (*event.Record, error) {
@@ -276,6 +335,9 @@ func (c *Collector) writeGap(ctx context.Context, sid string, spec discovery.Res
 	}
 	if _, err := c.cfg.Store.Append(ctx, rec); err != nil {
 		return storeErrf("append gap: %v", err)
+	}
+	if m := c.cfg.Metrics; m != nil {
+		m.Gaps.WithLabelValues(sid).Inc()
 	}
 	return nil
 }

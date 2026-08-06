@@ -84,10 +84,12 @@ func (m *Materializer) StateAt(ctx context.Context, clusterID string, at time.Ti
 
 // StreamStateResult is the reduced state of one stream.
 type StreamStateResult struct {
-	Objects     []ObjectState
-	HasGaps     bool
-	GapCount    int
-	HasBaseline bool
+	Objects             []ObjectState
+	HasGaps             bool
+	GapCount            int
+	HasBaseline         bool
+	LastObservedAt      time.Time
+	LastResourceVersion string
 }
 
 // StreamState reduces every event of a stream observed up to at into object
@@ -103,26 +105,45 @@ func (m *Materializer) StreamState(ctx context.Context, streamID string, at time
 		objs = append(objs, st)
 	}
 	sortObjects(objs)
-	return StreamStateResult{Objects: objs, HasGaps: red.hasGaps, GapCount: red.gapCount, HasBaseline: red.hasBaseline}, nil
+	return StreamStateResult{
+		Objects:             objs,
+		HasGaps:             red.hasGaps,
+		GapCount:            red.gapCount,
+		HasBaseline:         red.hasBaseline,
+		LastObservedAt:      red.lastObservedAt,
+		LastResourceVersion: red.lastRV,
+	}, nil
 }
 
 // reduction is the per-stream reduce result.
 type reduction struct {
-	states      map[string]ObjectState
-	hasBaseline bool
-	hasGaps     bool
-	gapCount    int
+	states          map[string]ObjectState
+	hasBaseline     bool
+	hasGaps         bool
+	gapCount        int
+	lastObservedAt  time.Time
+	lastRV          string
 }
 
 // reduce folds records into per-object state. DELETED removes the object,
-// BASELINE marks full coverage from that point, and GAP marks lost coverage.
+// GAP marks lost coverage, and BASELINE resets the view: a relist after a gap
+// re-establishes every object that still exists as a synthetic ADDED, so
+// objects deleted during the gap are dropped and any prior open gap is healed.
 func reduce(streamID string, recs []event.Record) reduction {
 	red := reduction{states: map[string]ObjectState{}}
 	for i := range recs {
 		rec := &recs[i]
+		if !rec.ObservedAt.IsZero() {
+			red.lastObservedAt = rec.ObservedAt
+		}
 		switch rec.Type {
 		case event.TypeBaseline:
 			red.hasBaseline = true
+			red.hasGaps = false
+			clear(red.states)
+			if rec.Resource.ResourceVersion != "" {
+				red.lastRV = rec.Resource.ResourceVersion
+			}
 		case event.TypeGap:
 			red.hasGaps = true
 			red.gapCount++
@@ -145,6 +166,13 @@ func reduce(streamID string, recs []event.Record) reduction {
 					Object:    rec.Object,
 					At:        rec.ObservedAt,
 				}
+				if rec.Resource.ResourceVersion != "" {
+					red.lastRV = rec.Resource.ResourceVersion
+				}
+			}
+		case event.TypeCheckpoint:
+			if rec.Checkpoint != nil && rec.Checkpoint.ResourceVersion != "" {
+				red.lastRV = rec.Checkpoint.ResourceVersion
 			}
 		}
 	}

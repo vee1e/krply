@@ -101,8 +101,10 @@ func sanitizeFinalizers(obj map[string]any, pol Policy) []string {
 	return warnings
 }
 
-// sanitizeService strips dynamic cluster IP fields from ClusterIP services.
-// LoadBalancer services are rejected by the caller via excludeReason.
+// sanitizeService strips dynamic cluster IP fields from ClusterIP and NodePort
+// services. Headless services (clusterIP: "None") keep their explicit value,
+// which is user-desired state. LoadBalancer services are rejected by the
+// caller via excludeReason.
 func sanitizeService(obj map[string]any) []string {
 	spec, _ := obj["spec"].(map[string]any)
 	if spec == nil {
@@ -110,9 +112,25 @@ func sanitizeService(obj map[string]any) []string {
 	}
 	switch serviceType(obj) {
 	case "", "ClusterIP":
+		if spec["clusterIP"] == "None" {
+			return nil
+		}
 		delete(spec, "clusterIP")
 		delete(spec, "clusterIPs")
 		return []string{"service cluster IP removed"}
+	case "NodePort":
+		// NodePort services also receive a server-assigned cluster IP, and a
+		// fixed nodePort from the source cluster would collide in the target.
+		delete(spec, "clusterIP")
+		delete(spec, "clusterIPs")
+		if ports, ok := spec["ports"].([]any); ok {
+			for _, p := range ports {
+				if pm, ok := p.(map[string]any); ok {
+					delete(pm, "nodePort")
+				}
+			}
+		}
+		return []string{"service cluster IP and nodePort removed for reassignment"}
 	}
 	return nil
 }

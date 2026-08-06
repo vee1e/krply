@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/krply/krply/internal/discovery"
+	"github.com/krply/krply/internal/metrics"
 	"github.com/krply/krply/internal/storage"
 	"github.com/krply/krply/internal/version"
 )
@@ -48,6 +49,14 @@ type Config struct {
 	// 500ms and 30s when zero.
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
+
+	// WatchIdleTimeout forces a reconnect when no watch event or bookmark has
+	// arrived within the window. Zero uses a 10 minute default. It prevents a
+	// silently dead connection from stalling the stream forever.
+	WatchIdleTimeout time.Duration
+
+	// Metrics, when non-nil, receives ingest counters for this collector.
+	Metrics *metrics.Metrics
 
 	// DynamicClient, when non-nil, is used instead of building a client from
 	// KubeConfig. It exists to make the collector testable with fake clients.
@@ -98,6 +107,9 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.MinBackoff > cfg.MaxBackoff {
 		cfg.MinBackoff = cfg.MaxBackoff
 	}
+	if cfg.WatchIdleTimeout <= 0 {
+		cfg.WatchIdleTimeout = 10 * time.Minute
+	}
 	if cfg.ClusterID == "" {
 		cfg.ClusterID = "cluster-unknown"
 	}
@@ -115,8 +127,13 @@ func userAgent(cfg Config) string {
 
 // Run starts one stream goroutine per configured resource and waits for all of
 // them to stop. It returns nil when the context is cancelled and the first
-// unrecoverable error (for example a closed store) otherwise.
+// unrecoverable error (for example a closed store) otherwise. When one stream
+// fails, the remaining streams are cancelled so no goroutine keeps writing to
+// the store after Run has returned.
 func (c *Collector) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(c.cfg.Resources))
 
@@ -125,6 +142,14 @@ func (c *Collector) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					select {
+					case errCh <- fmt.Errorf("watch stream panic: %v", r):
+					case <-ctx.Done():
+					}
+				}
+			}()
 			if err := c.runStream(ctx, spec); err != nil {
 				select {
 				case errCh <- err:
@@ -145,6 +170,8 @@ func (c *Collector) Run(ctx context.Context) error {
 		<-done
 		return nil
 	case err := <-errCh:
+		cancel()
+		<-done
 		return err
 	case <-done:
 		return nil

@@ -36,8 +36,9 @@ type FieldChange struct {
 	Removed bool
 }
 
-// ignoredKeys are server-owned or hash-only noise fields excluded from diffs.
-var ignoredKeys = map[string]bool{
+// metadataIgnoreKeys are server-owned metadata fields, ignored only when they
+// appear directly under metadata.
+var metadataIgnoreKeys = map[string]bool{
 	"uid":               true,
 	"resourceVersion":   true,
 	"creationTimestamp": true,
@@ -45,13 +46,30 @@ var ignoredKeys = map[string]bool{
 	"managedFields":     true,
 	"deletionTimestamp": true,
 	"ownerReferences":   true,
-	"status":            true,
-	"kubectl.kubernetes.io/last-applied-configuration": true,
+}
+
+// ignoreKey reports whether a map key at parentPath is server-owned noise.
+// Ignoring is path-scoped so a user field named "status", "uid" or
+// "resourceVersion" inside data or spec is never silently dropped.
+func ignoreKey(parentPath, key string) bool {
+	if key == "status" && parentPath == "" {
+		return true
+	}
+	if parentPath == "metadata" && metadataIgnoreKeys[key] {
+		return true
+	}
+	if key == "kubectl.kubernetes.io/last-applied-configuration" && parentPath == "metadata.annotations" {
+		return true
+	}
+	return false
 }
 
 // Diff reconstructs cluster state before and after, intersects object keys,
 // and reports semantic field changes, ignoring server-owned metadata.
 func (m *Materializer) Diff(ctx context.Context, clusterID, namespace string, before, after time.Time) (*DiffResult, error) {
+	if !before.IsZero() && !after.IsZero() && before.After(after) {
+		return nil, fmt.Errorf("materialize: before (%s) must not be after after (%s)", before.Format(time.RFC3339), after.Format(time.RFC3339))
+	}
 	streams, err := m.store.Streams(ctx)
 	if err != nil {
 		return nil, err
@@ -66,22 +84,27 @@ func (m *Materializer) Diff(ctx context.Context, clusterID, namespace string, be
 		if s.ClusterID != clusterID {
 			continue
 		}
-		b, err := m.StreamState(ctx, s.StreamID, before)
-		if err != nil {
-			return nil, err
+		if !before.IsZero() {
+			b, err := m.StreamState(ctx, s.StreamID, before)
+			if err != nil {
+				return nil, err
+			}
+			if b.HasGaps {
+				gapped = append(gapped, s.StreamID)
+			}
+			for _, st := range b.Objects {
+				if namespace != "" && st.Namespace != namespace {
+					continue
+				}
+				beforeStates[st.StreamID+"|"+st.Namespace+"/"+st.Name] = st
+			}
 		}
 		a, err := m.StreamState(ctx, s.StreamID, after)
 		if err != nil {
 			return nil, err
 		}
-		if b.HasGaps || a.HasGaps {
+		if a.HasGaps {
 			gapped = append(gapped, s.StreamID)
-		}
-		for _, st := range b.Objects {
-			if namespace != "" && st.Namespace != namespace {
-				continue
-			}
-			beforeStates[st.StreamID+"|"+st.Namespace+"/"+st.Name] = st
 		}
 		for _, st := range a.Objects {
 			if namespace != "" && st.Namespace != namespace {
@@ -183,7 +206,8 @@ func parseObject(raw json.RawMessage) any {
 
 // diffValue recurses into before/after and appends field changes at out.
 // Arrays are compared by index; a length change is reported as one change at
-// the array's path. Map objects recurse by key.
+// the array's path. Map objects recurse by key; keys present on only one side
+// are reported as a single Added/Removed change.
 func diffValue(path string, before, after any, out *[]FieldChange) {
 	if reflect.DeepEqual(before, after) {
 		return
@@ -204,10 +228,20 @@ func diffValue(path string, before, after any, out *[]FieldChange) {
 		}
 		sort.Strings(sorted)
 		for _, k := range sorted {
-			if ignoredKeys[k] {
+			if ignoreKey(path, k) {
 				continue
 			}
-			diffValue(joinPath(path, k), bm[k], am[k], out)
+			childPath := joinPath(path, k)
+			_, beforeHas := bm[k]
+			_, afterHas := am[k]
+			switch {
+			case beforeHas && !afterHas:
+				*out = append(*out, FieldChange{Path: childPath, Before: bm[k], Removed: true})
+			case !beforeHas && afterHas:
+				*out = append(*out, FieldChange{Path: childPath, After: am[k], Added: true})
+			default:
+				diffValue(childPath, bm[k], am[k], out)
+			}
 		}
 		return
 	}
@@ -226,9 +260,20 @@ func diffValue(path string, before, after any, out *[]FieldChange) {
 	*out = append(*out, FieldChange{Path: path, Before: before, After: after})
 }
 
+// joinPath builds a dotted path. Segments that could collide with the path
+// syntax ('.', '[', ']', '\') are backslash-escaped.
 func joinPath(parent, key string) string {
+	key = escapePathSegment(key)
 	if parent == "" {
 		return key
 	}
 	return parent + "." + key
+}
+
+func escapePathSegment(k string) string {
+	k = strings.ReplaceAll(k, `\`, `\\`)
+	k = strings.ReplaceAll(k, `.`, `\.`)
+	k = strings.ReplaceAll(k, `[`, `\[`)
+	k = strings.ReplaceAll(k, `]`, `\]`)
+	return k
 }

@@ -192,6 +192,7 @@ type DryRunResult struct {
 	Applied   int          `json:"applied"`
 	Conflicts []DryRunItem `json:"conflicts"`
 	Errors    []DryRunItem `json:"errors"`
+	Skipped   []DryRunItem `json:"skipped,omitempty"`
 	OK        bool         `json:"ok"`
 }
 
@@ -213,6 +214,7 @@ type ReplayRun struct {
 	FinishedAt *time.Time   `json:"finished_at,omitempty"`
 	Applied    int          `json:"applied"`
 	Errors     []DryRunItem `json:"errors,omitempty"`
+	Skipped    []DryRunItem `json:"skipped,omitempty"`
 }
 
 // Health is the server health response.

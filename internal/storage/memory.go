@@ -11,13 +11,15 @@ import (
 
 // NewInMemory returns a Store backed by RAM. It is for tests and for running
 // the query API without a persistent journal. It satisfies the same atomic
-// append+checkpoint contract as the SQLite store.
+// append+checkpoint contract as the SQLite store, including deduplication by
+// event_id for non-empty keys.
 func NewInMemory() Store {
 	m := &memoryStore{
 		records:   map[string][]*event.Record{},
 		seq:       0,
 		streams:   map[string]*StreamMeta{},
 		snapshots: map[string]*SnapshotRef{},
+		seqByKey:  map[string]int64{},
 	}
 	return m
 }
@@ -28,6 +30,7 @@ type memoryStore struct {
 	seq       int64
 	streams   map[string]*StreamMeta
 	snapshots map[string]*SnapshotRef
+	seqByKey  map[string]int64 // streamID\x00eventID -> ingest seq
 }
 
 func (m *memoryStore) Append(ctx context.Context, rec *event.Record) (int64, error) {
@@ -51,13 +54,24 @@ func (m *memoryStore) Appends(ctx context.Context, recs []*event.Record) ([]int6
 }
 
 func (m *memoryStore) appendLocked(rec *event.Record) (int64, error) {
+	if rec.EventID != "" {
+		if seq, ok := m.seqByKey[rec.StreamID+"\x00"+rec.EventID]; ok {
+			rec.IngestSeq = seq
+			return seq, nil
+		}
+	}
 	m.seq++
 	rec.IngestSeq = m.seq
 	if rec.ObservedAt.IsZero() {
 		rec.ObservedAt = time.Now().UTC()
 	}
 	m.records[rec.StreamID] = append(m.records[rec.StreamID], rec)
-	m.updateMeta(rec)
+	if rec.EventID != "" {
+		m.seqByKey[rec.StreamID+"\x00"+rec.EventID] = m.seq
+	}
+	if rec.StreamID != "" {
+		m.updateMeta(rec)
+	}
 	return m.seq, nil
 }
 
@@ -87,7 +101,9 @@ func (m *memoryStore) updateMeta(rec *event.Record) {
 	case event.TypeCoverageChange:
 		if rec.Coverage != nil {
 			meta.Available = rec.Coverage.Current.Available
-			if !meta.Available {
+			if meta.Available {
+				meta.Degraded = false
+			} else {
 				meta.Degraded = true
 			}
 		}
@@ -149,10 +165,22 @@ func (m *memoryStore) Events(ctx context.Context, f EventFilter) ([]event.Record
 			if !matches(r, f) {
 				continue
 			}
+			if f.SinceSeq > 0 && r.IngestSeq <= f.SinceSeq {
+				continue
+			}
 			out = append(out, *r)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IngestSeq < out[j].IngestSeq })
+	if f.Offset > 0 {
+		if int64(f.Offset) >= int64(len(out)) {
+			return nil, nil
+		}
+		out = out[f.Offset:]
+	}
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
 	return out, nil
 }
 
@@ -186,7 +214,7 @@ func (m *memoryStore) ObjectAt(ctx context.Context, ref ObjectRef, ts time.Time)
 	var last *event.Record
 	for i := range recs {
 		if recs[i].ObservedAt.After(ts) {
-			break
+			continue
 		}
 		if recs[i].WatchType == event.WatchDeleted {
 			last = nil
@@ -242,7 +270,7 @@ func (m *memoryStore) SaveSnapshot(ctx context.Context, snap *SnapshotRef) error
 	defer m.mu.Unlock()
 	cp := *snap
 	if cp.ID == "" {
-		cp.ID = "snap-" + time.Now().UTC().Format("20060102T150405")
+		cp.ID = "snap-" + time.Now().UTC().Format("20060102T150405.000000000")
 	}
 	m.snapshots[cp.ID] = &cp
 	return nil

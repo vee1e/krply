@@ -102,10 +102,32 @@ func timelineServer(ctx context.Context, name string, since time.Time) error {
 	if err := c.get("/v1/streams", &streams); err != nil {
 		return err
 	}
+
+	// Auto-detect the namespace from the journal when it was not provided, so
+	// namespaced objects work without --namespace.
+	namespace := timelineNamespace
+	if namespace == "" {
+		q := url.Values{}
+		q.Set("name", name)
+		if timelineKind != "" {
+			q.Set("kind", timelineKind)
+		}
+		var page queryv1.EventPage
+		if err := c.get(withQuery("/v1/events", q), &page); err != nil {
+			return err
+		}
+		for _, it := range page.Items {
+			if it.Namespace != "" {
+				namespace = it.Namespace
+				break
+			}
+		}
+	}
+
 	var match *queryv1.Stream
 	for i := range streams {
 		s := &streams[i]
-		if timelineNamespace != "" && s.Namespace != "" && s.Namespace != timelineNamespace {
+		if namespace != "" && s.Namespace != "" && s.Namespace != namespace {
 			continue
 		}
 		if timelineKind != "" && !strings.EqualFold(s.Kind, timelineKind) {
@@ -115,13 +137,13 @@ func timelineServer(ctx context.Context, name string, since time.Time) error {
 		break
 	}
 	if match == nil {
-		return fmt.Errorf("no stream found for object %s/%s", nsLabel(timelineNamespace), name)
+		return fmt.Errorf("no stream found for object %s/%s", nsLabel(namespace), name)
 	}
 
 	ref := api.EncodeObjectRef(storage.ObjectRef{
 		ClusterID: match.ClusterID,
 		StreamID:  match.ID,
-		Namespace: timelineNamespace,
+		Namespace: namespace,
 		Name:      name,
 	})
 	path := "/v1/objects/" + url.PathEscape(ref) + "/history"
@@ -191,7 +213,8 @@ func streamsForObject(ctx context.Context, store storage.Store, namespace, kind 
 }
 
 // resolveObjectNamespace finds the namespace of an object when it was not
-// provided, by searching the journal for the object's name.
+// provided, by searching the journal for the object's name. Cluster-scoped
+// objects (empty namespace everywhere) resolve to "".
 func resolveObjectNamespace(ctx context.Context, store storage.Store, name, namespace, kind string) (string, error) {
 	if namespace != "" {
 		return namespace, nil
@@ -205,7 +228,11 @@ func resolveObjectNamespace(ctx context.Context, store storage.Store, name, name
 			return recs[i].Resource.Namespace, nil
 		}
 	}
-	return "", fmt.Errorf("could not determine namespace for object %q (pass --namespace)", name)
+	if len(recs) == 0 {
+		return "", fmt.Errorf("no records found for object %q", name)
+	}
+	// Every matching record is cluster-scoped.
+	return "", nil
 }
 
 type tlRow struct {

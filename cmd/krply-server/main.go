@@ -19,9 +19,10 @@ import (
 	"github.com/krply/krply/internal/metrics"
 	"github.com/krply/krply/internal/replay"
 	"github.com/krply/krply/internal/storage"
+	"github.com/krply/krply/internal/version"
 )
 
-const version = "0.1.0"
+var buildVersion = version.Version
 
 func main() {
 	if err := run(); err != nil {
@@ -86,7 +87,7 @@ func run() error {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Println(version)
+		fmt.Println(buildVersion)
 		return nil
 	}
 
@@ -123,17 +124,40 @@ func run() error {
 
 	m := metrics.New()
 	m.RefreshFromStore(ctx, store)
+	planner.SetMetrics(m)
 
-	srv, err := api.NewServer(store, mat, planner, m, version)
+	// Store-derived gauges are refreshed on a ticker; nothing else in the
+	// process would update degraded streams, gap counts, or store size.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.RefreshFromStore(ctx, store)
+			}
+		}
+	}()
+
+	srv, err := api.NewServer(store, mat, planner, m, buildVersion)
 	if err != nil {
 		return fmt.Errorf("build api server: %w", err)
 	}
 
-	httpSrv := &http.Server{Addr: listenAddr, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:              listenAddr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("krply-server listening", "addr", listenAddr, "store", *storePath, "version", version)
+		slog.Info("krply-server listening", "addr", listenAddr, "store", *storePath, "version", buildVersion)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

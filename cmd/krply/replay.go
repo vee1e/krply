@@ -41,7 +41,7 @@ var replayPlanCmd = &cobra.Command{
 
 var replayApplyCmd = &cobra.Command{
 	Use:   "apply",
-	Short: "dry-run and apply a replay plan (requires --server)",
+	Short: "dry-run and apply a replay plan (local, or via --server)",
 	Args:  cobra.NoArgs,
 	RunE:  runReplayApply,
 }
@@ -59,8 +59,12 @@ func init() {
 	f.BoolVar(&replayAllowGaps, "allow-gaps", false, "allow a plan with incomplete coverage")
 
 	g := replayApplyCmd.Flags()
-	g.StringVar(&replayPlanID, "plan-id", "", "plan id to apply")
+	g.StringVar(&replayPlanID, "plan-id", "", "plan id to apply (server mode)")
+	g.StringVar(&replaySnapshotID, "snapshot", "", "snapshot id to re-plan and apply (local mode)")
+	g.StringVar(&replaySourceNS, "source-namespace", "", "source namespace to replay (empty = all)")
+	g.StringVar(&replayTargetNS, "target-namespace", "", "target namespace to apply into")
 	g.StringVar(&replayTargetContext, "target-context", "", "target kubeconfig context")
+	g.BoolVar(&replayAllowGaps, "allow-gaps", false, "allow a plan with incomplete coverage")
 	g.BoolVar(&replayConfirm, "confirm", false, "confirm the apply")
 }
 
@@ -101,16 +105,73 @@ func runReplayPlan(cmd *cobra.Command, args []string) error {
 }
 
 func runReplayApply(cmd *cobra.Command, args []string) error {
-	if replayPlanID == "" {
-		return errors.New("replay apply requires --plan-id")
-	}
 	if !replayConfirm {
 		return errors.New("refusing apply without --confirm")
 	}
-	if serverURL == "" {
-		return errors.New("replay apply requires --server pointing at krply-server")
+	if serverURL != "" {
+		if replayPlanID == "" {
+			return errors.New("replay apply --server requires --plan-id")
+		}
+		return replayApplyServer(cmd.Context())
+	}
+	return replayApplyLocal(cmd)
+}
+
+// replayApplyLocal replans the snapshot from the local journal, dry-runs it,
+// and applies it directly. This makes the natural plan-then-apply flow work
+// without a server.
+func replayApplyLocal(cmd *cobra.Command) error {
+	if replaySnapshotID == "" {
+		return errors.New("replay apply (local) requires --snapshot")
+	}
+	store, err := openStore(storePath)
+	if err != nil {
+		return err
+	}
+	defer closeStore(store)
+
+	clusters, err := store.ListClusters(cmd.Context())
+	if err != nil {
+		return err
+	}
+	clusterID, err := firstClusterID(clusters)
+	if err != nil {
+		return err
 	}
 
+	mat := materialize.NewMaterializer(store)
+	policy := replay.DefaultPolicy()
+	policy.AllowGaps = replayAllowGaps
+	planner := replay.NewPlanner(store, mat, policy)
+	plan, err := planner.Plan(cmd.Context(), clusterID, replaySnapshotID, replaySourceNS, replayTargetNS)
+	if err != nil {
+		return err
+	}
+	printPlan(plan)
+
+	dry, err := plan.DryRun(cmd.Context(), kubeconfig, replayTargetContext)
+	if err != nil {
+		return err
+	}
+	printDryRunResult(dry)
+	if !dry.OK {
+		return errors.New("refusing apply: dry run did not pass")
+	}
+	res, err := plan.Apply(cmd.Context(), kubeconfig, replayTargetContext, true)
+	if err != nil {
+		return err
+	}
+	out("applied %d objects\n", res.Applied)
+	for _, e := range res.Errors {
+		warn("apply error: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
+	for _, e := range res.Skipped {
+		warn("skipped: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
+	return nil
+}
+
+func replayApplyServer(ctx context.Context) error {
 	c := newAPIClient(serverURL)
 
 	var dry queryv1.DryRunResult
@@ -120,12 +181,18 @@ func runReplayApply(cmd *cobra.Command, args []string) error {
 	}, &dry); err != nil {
 		return err
 	}
-	out("dry run: applied=%d conflicts=%d errors=%d ok=%v\n", dry.Applied, len(dry.Conflicts), len(dry.Errors), dry.OK)
+	out("dry run: applied=%d conflicts=%d errors=%d skipped=%d ok=%v\n", dry.Applied, len(dry.Conflicts), len(dry.Errors), len(dry.Skipped), dry.OK)
 	for _, ci := range dry.Conflicts {
 		warn("conflict: %s/%s (%s): %s\n", ci.Namespace, ci.Name, ci.Kind, ci.Message)
 	}
 	for _, e := range dry.Errors {
 		warn("dry-run error: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
+	for _, e := range dry.Skipped {
+		warn("dry-run skipped: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
+	if !dry.OK {
+		return errors.New("refusing apply: dry run did not pass")
 	}
 
 	var run queryv1.ReplayRun
@@ -140,10 +207,26 @@ func runReplayApply(cmd *cobra.Command, args []string) error {
 	for _, e := range run.Errors {
 		warn("apply error: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
 	}
+	for _, e := range run.Skipped {
+		warn("skipped: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
 	if run.Status != "" {
 		out("status: %s\n", run.Status)
 	}
 	return nil
+}
+
+func printDryRunResult(d *replay.DryRunResult) {
+	out("dry run: applied=%d conflicts=%d errors=%d skipped=%d ok=%v\n", d.Applied, len(d.Conflicts), len(d.Errors), len(d.Skipped), d.OK)
+	for _, ci := range d.Conflicts {
+		warn("conflict: %s/%s (%s): %s\n", ci.Namespace, ci.Name, ci.Kind, ci.Message)
+	}
+	for _, e := range d.Errors {
+		warn("dry-run error: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
+	for _, e := range d.Skipped {
+		warn("dry-run skipped: %s/%s (%s): %s\n", e.Namespace, e.Name, e.Kind, e.Message)
+	}
 }
 
 func replayPlanServer(ctx context.Context) error {

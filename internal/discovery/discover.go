@@ -76,19 +76,21 @@ func resolveOne(ctx context.Context, client kubernetes.Interface, spec ResourceS
 	return resolveViaDiscovery(ctx, client, spec)
 }
 
-// mergeAlias fills empty fields on spec from the alias, keeping any explicit
-// Namespace and replacing the alias resource name with its canonical form.
+// mergeAlias fills empty fields on spec from the alias. Explicit fields on the
+// user's spec are never overwritten so a fully- or partially-qualified spec
+// whose plural name happens to match an alias (for example a CRD named "pods")
+// is not silently rewritten to the built-in resource.
 func mergeAlias(spec, alias ResourceSpec) ResourceSpec {
-	if alias.APIGroup != "" {
+	if spec.APIGroup == "" {
 		spec.APIGroup = alias.APIGroup
 	}
-	if alias.Version != "" {
+	if spec.Version == "" {
 		spec.Version = alias.Version
 	}
-	if alias.Kind != "" {
+	if spec.Kind == "" {
 		spec.Kind = alias.Kind
 	}
-	if alias.Resource != "" {
+	if alias.Resource != "" && !strings.EqualFold(spec.Resource, alias.Resource) {
 		spec.Resource = alias.Resource
 	}
 	return spec
@@ -150,28 +152,33 @@ func resolveInGroupVersion(ctx context.Context, client kubernetes.Interface, spe
 
 // aliases maps common kubectl-style names to canonical specs.
 var aliases = map[string]ResourceSpec{
-	"deploy":         {APIGroup: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment"},
-	"deployment":     {APIGroup: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment"},
-	"deployments":    {APIGroup: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment"},
-	"sts":            {APIGroup: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet"},
-	"statefulset":    {APIGroup: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet"},
-	"statefulsets":   {APIGroup: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet"},
-	"ds":             {APIGroup: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet"},
-	"daemonset":      {APIGroup: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet"},
-	"daemonsets":     {APIGroup: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet"},
-	"cm":             {Version: "v1", Resource: "configmaps", Kind: "ConfigMap"},
-	"configmap":      {Version: "v1", Resource: "configmaps", Kind: "ConfigMap"},
-	"configmaps":     {Version: "v1", Resource: "configmaps", Kind: "ConfigMap"},
-	"po":             {Version: "v1", Resource: "pods", Kind: "Pod"},
-	"pod":            {Version: "v1", Resource: "pods", Kind: "Pod"},
-	"pods":           {Version: "v1", Resource: "pods", Kind: "Pod"},
-	"svc":            {Version: "v1", Resource: "services", Kind: "Service"},
-	"service":        {Version: "v1", Resource: "services", Kind: "Service"},
-	"services":       {Version: "v1", Resource: "services", Kind: "Service"},
-	"ns":             {Version: "v1", Resource: "namespaces", Kind: "Namespace"},
-	"namespace":      {Version: "v1", Resource: "namespaces", Kind: "Namespace"},
-	"namespaces":     {Version: "v1", Resource: "namespaces", Kind: "Namespace"},
-	"rc":             {APIGroup: "node.k8s.io", Version: "v1", Resource: "runtimeclasses", Kind: "RuntimeClass"},
-	"runtimeclass":   {APIGroup: "node.k8s.io", Version: "v1", Resource: "runtimeclasses", Kind: "RuntimeClass"},
-	"runtimeclasses": {APIGroup: "node.k8s.io", Version: "v1", Resource: "runtimeclasses", Kind: "RuntimeClass"},
+	"deploy":                 {APIGroup: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment"},
+	"deployment":             {APIGroup: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment"},
+	"deployments":            {APIGroup: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment"},
+	"sts":                    {APIGroup: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet"},
+	"statefulset":            {APIGroup: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet"},
+	"statefulsets":           {APIGroup: "apps", Version: "v1", Resource: "statefulsets", Kind: "StatefulSet"},
+	"ds":                     {APIGroup: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet"},
+	"daemonset":              {APIGroup: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet"},
+	"daemonsets":             {APIGroup: "apps", Version: "v1", Resource: "daemonsets", Kind: "DaemonSet"},
+	"cm":                     {Version: "v1", Resource: "configmaps", Kind: "ConfigMap"},
+	"configmap":              {Version: "v1", Resource: "configmaps", Kind: "ConfigMap"},
+	"configmaps":             {Version: "v1", Resource: "configmaps", Kind: "ConfigMap"},
+	"po":                     {Version: "v1", Resource: "pods", Kind: "Pod"},
+	"pod":                    {Version: "v1", Resource: "pods", Kind: "Pod"},
+	"pods":                   {Version: "v1", Resource: "pods", Kind: "Pod"},
+	"svc":                    {Version: "v1", Resource: "services", Kind: "Service"},
+	"service":                {Version: "v1", Resource: "services", Kind: "Service"},
+	"services":               {Version: "v1", Resource: "services", Kind: "Service"},
+	"ns":                     {Version: "v1", Resource: "namespaces", Kind: "Namespace"},
+	"namespace":              {Version: "v1", Resource: "namespaces", Kind: "Namespace"},
+	"namespaces":             {Version: "v1", Resource: "namespaces", Kind: "Namespace"},
+	"rc":                     {Version: "v1", Resource: "replicationcontrollers", Kind: "ReplicationController"},
+	"replicationcontroller":  {Version: "v1", Resource: "replicationcontrollers", Kind: "ReplicationController"},
+	"replicationcontrollers": {Version: "v1", Resource: "replicationcontrollers", Kind: "ReplicationController"},
+	"rs":                     {APIGroup: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet"},
+	"replicaset":             {APIGroup: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet"},
+	"replicasets":            {APIGroup: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet"},
+	"runtimeclass":           {APIGroup: "node.k8s.io", Version: "v1", Resource: "runtimeclasses", Kind: "RuntimeClass"},
+	"runtimeclasses":         {APIGroup: "node.k8s.io", Version: "v1", Resource: "runtimeclasses", Kind: "RuntimeClass"},
 }

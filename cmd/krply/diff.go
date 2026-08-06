@@ -51,6 +51,9 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if since.IsZero() || until.IsZero() {
 		return errors.New("diff requires both --since and --until")
 	}
+	if since.After(until) {
+		return errors.New("diff: --since must not be after --until")
+	}
 
 	if serverURL != "" {
 		return diffServer(cmd.Context(), since, until)

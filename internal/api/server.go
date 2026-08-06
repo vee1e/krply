@@ -266,20 +266,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	f.Limit = limit + 1
+	f.SinceSeq = cursorSeq
 	recs, err := s.store.Events(r.Context(), f)
 	if err != nil {
 		s.internalError(w, "events", err)
 		return
-	}
-
-	if cursorSeq > 0 {
-		filtered := recs[:0]
-		for _, rec := range recs {
-			if rec.IngestSeq > cursorSeq {
-				filtered = append(filtered, rec)
-			}
-		}
-		recs = filtered
 	}
 
 	hasMore := len(recs) > limit
@@ -350,6 +341,10 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	clusterID := q.Get("cluster_id")
 	namespace := q.Get("namespace")
+	if clusterID == "" {
+		writeError(w, http.StatusBadRequest, "cluster_id is required")
+		return
+	}
 	before, err := parseTimeParam(q.Get("since"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid since: "+err.Error())
@@ -437,6 +432,7 @@ type createPlanRequest struct {
 	SnapshotID      string `json:"snapshot_id"`
 	SourceNamespace string `json:"source_namespace"`
 	TargetNamespace string `json:"target_namespace"`
+	TargetContext   string `json:"target_context"`
 	AllowGaps       bool   `json:"allow_gaps"`
 }
 
@@ -468,6 +464,7 @@ func (s *Server) handleCreatePlan(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	plan.TargetContext = req.TargetContext
 	now := time.Now().UTC()
 	s.planMu.Lock()
 	s.plans[plan.ID] = plan
@@ -487,7 +484,6 @@ func (s *Server) handleGetPlan(w http.ResponseWriter, r *http.Request) {
 }
 
 type dryRunRequest struct {
-	Kubeconfig    string `json:"kubeconfig"`
 	TargetContext string `json:"target_context"`
 }
 
@@ -503,7 +499,9 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}
-	res, err := p.DryRun(r.Context(), req.Kubeconfig, req.TargetContext)
+	// The server resolves the target cluster through its own kubeconfig and
+	// context; it never accepts a kubeconfig from a network client.
+	res, err := p.DryRun(r.Context(), "", req.TargetContext)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -515,7 +513,6 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 
 type replayRunRequest struct {
 	PlanID        string `json:"plan_id"`
-	Kubeconfig    string `json:"kubeconfig"`
 	TargetContext string `json:"target_context"`
 	Confirm       bool   `json:"confirm"`
 }
@@ -539,7 +536,9 @@ func (s *Server) handleReplayRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "refusing apply without confirm=true")
 		return
 	}
-	res, err := p.Apply(r.Context(), req.Kubeconfig, req.TargetContext, true)
+	// The target cluster is resolved through the server's own kubeconfig and
+	// context, never through a client-supplied kubeconfig.
+	res, err := p.Apply(r.Context(), "", req.TargetContext, true)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -553,6 +552,7 @@ func (s *Server) handleReplayRun(w http.ResponseWriter, r *http.Request) {
 		FinishedAt: &now,
 		Applied:    res.Applied,
 		Errors:     mapDryRunItems(res.Errors),
+		Skipped:    mapDryRunItems(res.Skipped),
 	})
 }
 
@@ -744,6 +744,8 @@ func mapDiffResult(clusterID, namespace string, d *materialize.DiffResult) query
 }
 
 func (s *Server) mapPlan(p *replay.Plan, createdAt time.Time) queryv1.ReplayPlan {
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 	objects := make([]queryv1.PlanObject, 0, len(p.Objects))
 	for _, o := range p.Objects {
 		objects = append(objects, queryv1.PlanObject{
@@ -764,6 +766,8 @@ func (s *Server) mapPlan(p *replay.Plan, createdAt time.Time) queryv1.ReplayPlan
 			Reason:    e.Reason,
 		})
 	}
+	warnings := make([]string, len(p.Warnings))
+	copy(warnings, p.Warnings)
 	return queryv1.ReplayPlan{
 		ID:               p.ID,
 		ClusterID:        p.ClusterID,
@@ -774,7 +778,7 @@ func (s *Server) mapPlan(p *replay.Plan, createdAt time.Time) queryv1.ReplayPlan
 		CreatedAt:        createdAt,
 		FieldManager:     p.FieldManager,
 		Objects:          objects,
-		Warnings:         p.Warnings,
+		Warnings:         warnings,
 		Excluded:         excluded,
 		CoverageComplete: p.CoverageComplete,
 		Status:           p.Status,
@@ -786,6 +790,7 @@ func mapDryRunResult(d *replay.DryRunResult) *queryv1.DryRunResult {
 		Applied:   d.Applied,
 		Conflicts: mapDryRunItems(d.Conflicts),
 		Errors:    mapDryRunItems(d.Errors),
+		Skipped:   mapDryRunItems(d.Skipped),
 		OK:        d.OK,
 	}
 }
@@ -832,7 +837,13 @@ func DecodeObjectRef(token string) (storage.ObjectRef, error) {
 // mapEvent normalizes a journal record for API consumption.
 func mapEvent(r event.Record) queryv1.Event {
 	var object any
-	if len(r.Object) > 0 {
+	if r.Type == event.TypeGap && r.Gap != nil {
+		object = map[string]any{
+			"from_resource_version": r.Gap.FromResourceVersion,
+			"to_resource_version":   r.Gap.ToResourceVersion,
+			"reason":                r.Gap.Reason,
+		}
+	} else if len(r.Object) > 0 {
 		var v any
 		if err := json.Unmarshal(r.Object, &v); err == nil {
 			object = v

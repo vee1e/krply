@@ -40,6 +40,7 @@ type EventFilter struct {
 	RecordType event.RecordType
 	Since      time.Time
 	Until      time.Time
+	SinceSeq   int64 // return only records with ingest_seq > SinceSeq (cursor)
 	Limit      int
 	Offset     int64
 }

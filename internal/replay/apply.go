@@ -20,6 +20,7 @@ type DryRunResult struct {
 	Applied   int
 	Conflicts []DryRunItem
 	Errors    []DryRunItem
+	Skipped   []DryRunItem
 	OK        bool
 }
 
@@ -37,18 +38,23 @@ type ApplyResult struct {
 	PlanID  string
 	Applied int
 	Errors  []DryRunItem
+	Skipped []DryRunItem
 }
 
 // DryRun runs a server-side apply dry run against the target cluster. It never
 // sends Force, so ownership conflicts are reported instead of overwritten. OK
-// is true only when there are no conflicts and no errors.
+// is true only when there are no conflicts, no errors, and nothing skipped.
 func (pl *Plan) DryRun(ctx context.Context, kubeconfig, targetContext string) (*DryRunResult, error) {
+	pl.Mu.Lock()
+	defer pl.Mu.Unlock()
 	dyn, err := pl.dynamicClient(kubeconfig, targetContext)
 	if err != nil {
 		return nil, err
 	}
 	res := &DryRunResult{}
-	for _, it := range pl.applyItems() {
+	items, skipped := pl.applyItems()
+	res.Skipped = skipped
+	for _, it := range items {
 		if err := applyOne(ctx, dyn, it, pl.FieldManager, true); err != nil {
 			if apierrors.IsConflict(err) {
 				res.Conflicts = append(res.Conflicts, DryRunItem{
@@ -58,6 +64,9 @@ func (pl *Plan) DryRun(ctx context.Context, kubeconfig, targetContext string) (*
 					Manager:   conflictManager(err),
 					Message:   err.Error(),
 				})
+			} else if apierrors.IsNotFound(err) && it.namespace != "" {
+				// The target namespace does not exist yet; Apply creates it
+				// first, so this is not a real failure for the dry run.
 			} else {
 				res.Errors = append(res.Errors, DryRunItem{
 					Namespace: it.namespace,
@@ -70,7 +79,7 @@ func (pl *Plan) DryRun(ctx context.Context, kubeconfig, targetContext string) (*
 		}
 		res.Applied++
 	}
-	res.OK = len(res.Conflicts) == 0 && len(res.Errors) == 0
+	res.OK = len(res.Conflicts) == 0 && len(res.Errors) == 0 && len(res.Skipped) == 0
 	if res.OK {
 		pl.Status = "dry-run-ok"
 	} else {
@@ -80,20 +89,28 @@ func (pl *Plan) DryRun(ctx context.Context, kubeconfig, targetContext string) (*
 }
 
 // Apply applies the plan to the target cluster with server-side apply using
-// the synthetic field manager. It refuses to run without explicit
-// confirmation. Failures are collected per object and never stop the loop.
+// the synthetic field manager. It refuses to run without explicit confirmation
+// and without a previously successful dry run (the plan status must be
+// "dry-run-ok"). Failures are collected per object and never stop the loop.
 func (pl *Plan) Apply(ctx context.Context, kubeconfig, targetContext string, confirm bool) (*ApplyResult, error) {
 	if !confirm {
 		return nil, errors.New("refusing apply without --confirm")
+	}
+	pl.Mu.Lock()
+	defer pl.Mu.Unlock()
+	if pl.Status != "dry-run-ok" {
+		return nil, fmt.Errorf("refusing apply: plan %s has not passed a dry run (status %q)", pl.ID, pl.Status)
 	}
 	dyn, err := pl.dynamicClient(kubeconfig, targetContext)
 	if err != nil {
 		return nil, err
 	}
 	result := &ApplyResult{PlanID: pl.ID}
+	items, skipped := pl.applyItems()
+	result.Skipped = skipped
 
 	ensured := map[string]bool{}
-	for _, it := range pl.applyItems() {
+	for _, it := range items {
 		if it.namespace != "" && it.gvr.Resource != "namespaces" && !ensured[it.namespace] {
 			ensured[it.namespace] = true
 			if err := ensureNamespace(ctx, dyn, it.namespace); err != nil {
@@ -173,13 +190,22 @@ type applyItem struct {
 }
 
 // applyItems converts plan objects into apply items, skipping objects whose
-// apiVersion or kind has no supported GVR mapping.
-func (pl *Plan) applyItems() []applyItem {
+// apiVersion or kind has no supported GVR mapping. Skipped objects are
+// returned explicitly so callers can report them instead of silently dropping
+// objects while claiming success.
+func (pl *Plan) applyItems() ([]applyItem, []DryRunItem) {
 	items := make([]applyItem, 0, len(pl.Objects))
+	var skipped []DryRunItem
 	for _, po := range pl.Objects {
 		gvr, err := gvrFor(po.Object, po.Kind)
 		if err != nil {
 			pl.Warnings = append(pl.Warnings, fmt.Sprintf("replay: skipping %s/%s: %v", po.Kind, po.Name, err))
+			skipped = append(skipped, DryRunItem{
+				Namespace: po.Namespace,
+				Name:      po.Name,
+				Kind:      po.Kind,
+				Message:   err.Error(),
+			})
 			continue
 		}
 		items = append(items, applyItem{
@@ -190,7 +216,45 @@ func (pl *Plan) applyItems() []applyItem {
 			object:    po.Object,
 		})
 	}
-	return items
+	return items, skipped
+}
+
+// kindToResource maps object kinds to their plural resource names for the
+// dynamic client. Group and version come from the object's apiVersion.
+var kindToResource = map[string]string{
+	"Deployment":                    "deployments",
+	"StatefulSet":                   "statefulsets",
+	"DaemonSet":                     "daemonsets",
+	"ReplicaSet":                    "replicasets",
+	"Service":                       "services",
+	"ConfigMap":                     "configmaps",
+	"Namespace":                     "namespaces",
+	"RuntimeClass":                  "runtimeclasses",
+	"Secret":                        "secrets",
+	"ServiceAccount":                "serviceaccounts",
+	"Role":                          "roles",
+	"ClusterRole":                   "clusterroles",
+	"RoleBinding":                   "rolebindings",
+	"ClusterRoleBinding":            "clusterrolebindings",
+	"Job":                           "jobs",
+	"CronJob":                       "cronjobs",
+	"Pod":                           "pods",
+	"PersistentVolume":              "persistentvolumes",
+	"PersistentVolumeClaim":         "persistentvolumeclaims",
+	"StorageClass":                  "storageclasses",
+	"VolumeAttachment":              "volumeattachments",
+	"MutatingWebhookConfiguration":  "mutatingwebhookconfigurations",
+	"ValidatingWebhookConfiguration": "validatingwebhookconfigurations",
+	"CustomResourceDefinition":      "customresourcedefinitions",
+	"Ingress":                       "ingresses",
+	"NetworkPolicy":                 "networkpolicies",
+	"LimitRange":                    "limitranges",
+	"ResourceQuota":                 "resourcequotas",
+	"HorizontalPodAutoscaler":       "horizontalpodautoscalers",
+	"PodDisruptionBudget":           "poddisruptionbudgets",
+	"Endpoints":                     "endpoints",
+	"PriorityClass":                 "priorityclasses",
+	"Lease":                         "leases",
 }
 
 func gvrFor(obj map[string]any, kind string) (schema.GroupVersionResource, error) {
@@ -202,23 +266,8 @@ func gvrFor(obj map[string]any, kind string) (schema.GroupVersionResource, error
 	if err != nil {
 		return schema.GroupVersionResource{}, err
 	}
-	var resource string
-	switch kind {
-	case "Deployment":
-		resource = "deployments"
-	case "StatefulSet":
-		resource = "statefulsets"
-	case "DaemonSet":
-		resource = "daemonsets"
-	case "Service":
-		resource = "services"
-	case "ConfigMap":
-		resource = "configmaps"
-	case "Namespace":
-		resource = "namespaces"
-	case "RuntimeClass":
-		resource = "runtimeclasses"
-	default:
+	resource, ok := kindToResource[kind]
+	if !ok {
 		return schema.GroupVersionResource{}, fmt.Errorf("replay: unsupported kind %q", kind)
 	}
 	return schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: resource}, nil
@@ -262,7 +311,7 @@ func ensureNamespace(ctx context.Context, dyn dynamic.Interface, ns string) erro
 // conflict status, falling back to an empty string when it is not available.
 func conflictManager(err error) string {
 	var statusErr *apierrors.StatusError
-	if errors.As(err, &statusErr) {
+	if errors.As(err, &statusErr) && statusErr.ErrStatus.Details != nil {
 		for _, c := range statusErr.ErrStatus.Details.Causes {
 			if c.Field == "manager" || strings.Contains(c.Message, "conflict") {
 				return c.Message

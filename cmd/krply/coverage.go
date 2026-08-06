@@ -115,18 +115,26 @@ func coverageServer(ctx context.Context, streamID string) error {
 	q := url.Values{}
 	q.Set("stream_id", streamID)
 	q.Set("record_type", string(event.TypeGap))
-	var page queryv1.EventPage
-	if err := c.get(withQuery("/v1/events", q), &page); err != nil {
-		return err
+	var items []queryv1.Event
+	for {
+		var page queryv1.EventPage
+		if err := c.get(withQuery("/v1/events", q), &page); err != nil {
+			return err
+		}
+		items = append(items, page.Items...)
+		if !page.HasMore || page.NextCursor == "" {
+			break
+		}
+		q.Set("cursor", page.NextCursor)
 	}
-	if len(page.Items) == 0 {
+	if len(items) == 0 {
 		out("no gaps recorded\n")
 		return nil
 	}
-	out("GAPS (%d):\n", len(page.Items))
+	out("GAPS (%d):\n", len(items))
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "FROM-RV\tTO-RV\tREASON\tDETECTED")
-	for _, it := range page.Items {
+	for _, it := range items {
 		from, to, reason := gapFromEvent(it)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", from, to, reason, it.ObservedAt.Format(time.RFC3339))
 	}

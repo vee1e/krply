@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/krply/krply/internal/materialize"
+	"github.com/krply/krply/internal/metrics"
 	"github.com/krply/krply/internal/storage"
 )
 
@@ -32,6 +34,9 @@ type Excluded struct {
 
 // Plan is a sanitized, reviewable replay of a snapshot into a target cluster.
 type Plan struct {
+	// Mu guards Status, Warnings, and Objects so concurrent dry-runs/applies
+	// and reads from the API do not race.
+	Mu               sync.RWMutex
 	ID               string
 	ClusterID        string
 	SnapshotID       string
@@ -48,14 +53,26 @@ type Plan struct {
 
 // Planner builds replay plans from a store and a materializer.
 type Planner struct {
-	store  storage.Store
-	mat    *materialize.Materializer
-	policy Policy
+	store   storage.Store
+	mat     *materialize.Materializer
+	policy  Policy
+	metrics *metrics.Metrics
 }
 
 // NewPlanner returns a Planner backed by store and mat using policy.
 func NewPlanner(store storage.Store, mat *materialize.Materializer, policy Policy) *Planner {
 	return &Planner{store: store, mat: mat, policy: policy}
+}
+
+// SetMetrics attaches a Metrics instance so plan failures are counted.
+func (p *Planner) SetMetrics(m *metrics.Metrics) {
+	p.metrics = m
+}
+
+func (p *Planner) countFailure() {
+	if p.metrics != nil {
+		p.metrics.ReplayPlanFailures.Inc()
+	}
 }
 
 // Plan reconstructs the objects of the given snapshot, sanitizes them, and
@@ -64,31 +81,35 @@ func NewPlanner(store storage.Store, mat *materialize.Materializer, policy Polic
 func (p *Planner) Plan(ctx context.Context, clusterID, snapshotID, sourceNS, targetNS string) (*Plan, error) {
 	snap, err := p.lookupSnapshot(ctx, snapshotID)
 	if err != nil {
+		p.countFailure()
 		return nil, err
 	}
 
 	states, complete, err := p.mat.StateAt(ctx, snap.ClusterID, snap.At)
 	if err != nil {
+		p.countFailure()
 		return nil, err
 	}
 
 	if !complete && !p.policy.AllowGaps {
+		p.countFailure()
 		return nil, errors.New("refusing plan: incomplete coverage (stream gaps) — pass allow-gaps to override")
 	}
 
-	id := "plan-" + uuid.NewString()[:8]
+	id := "plan-" + uuid.NewString()[:12]
 	plan := &Plan{
 		ID:               id,
 		ClusterID:        snap.ClusterID,
 		SnapshotID:       snapshotID,
 		SourceNamespace:  sourceNS,
 		TargetNamespace:  targetNS,
-		FieldManager:     "krply-plan-" + id,
+		FieldManager:     "krply-" + id,
 		Status:           "planned",
 		CoverageComplete: complete,
 	}
 
 	mapped := false
+	seenTarget := map[string]bool{}
 	for _, st := range states {
 		var obj map[string]any
 		if err := json.Unmarshal(st.Object, &obj); err != nil {
@@ -115,6 +136,19 @@ func (p *Planner) Plan(ctx context.Context, clusterID, snapshotID, sourceNS, tar
 
 		clean, warnings := sanitizeObject(obj, kind, p.policy)
 		effectiveNS := mapNamespace(clean, namespace, sourceNS, targetNS, p.policy, &mapped, &plan.Warnings)
+
+		// Namespace remapping can collapse distinct source namespaces into one
+		// target, which would silently overwrite same-named objects. Detect the
+		// collision and exclude the later object instead.
+		if effectiveNS != "" && sourceNS == "" && targetNS != "" {
+			key := effectiveNS + "/" + kind + "/" + name
+			if seenTarget[key] {
+				plan.Excluded = append(plan.Excluded, Excluded{Namespace: effectiveNS, Name: name, Kind: kind, Reason: "name collision after namespace mapping"})
+				plan.Warnings = append(plan.Warnings, fmt.Sprintf("excluded %s %s/%s: name collision after mapping into %s", kind, effectiveNS, name, targetNS))
+				continue
+			}
+			seenTarget[key] = true
+		}
 
 		plan.Objects = append(plan.Objects, PlanObject{
 			Namespace: effectiveNS,
@@ -154,8 +188,11 @@ func (p *Planner) lookupSnapshot(ctx context.Context, snapshotID string) (*stora
 }
 
 // mapNamespace applies namespace remapping and returns the effective namespace
-// the object will be applied to. When no remap is requested, the namespace is
-// dropped from the payload (the caller sets it at apply time).
+// the object will be applied to. An explicit targetNS is always honored (even
+// when MapNamespaces is false): objects are filtered to sourceNS first, so
+// mapping sourceNS -> targetNS never touches other namespaces. When no remap is
+// requested, the namespace is dropped from the payload (the caller sets it at
+// apply time).
 func mapNamespace(obj map[string]any, namespace, sourceNS, targetNS string, pol Policy, mapped *bool, warnings *[]string) string {
 	if namespace == "" {
 		return ""
@@ -163,18 +200,15 @@ func mapNamespace(obj map[string]any, namespace, sourceNS, targetNS string, pol 
 	m := meta(obj)
 
 	switch {
-	case pol.MapNamespaces && sourceNS != "" && targetNS != "":
+	case targetNS != "":
 		m["namespace"] = targetNS
 		remapSpecNamespace(obj, targetNS)
 		if !*mapped {
-			*warnings = append(*warnings, fmt.Sprintf("namespace mapping: %s -> %s", sourceNS, targetNS))
-			*mapped = true
-		}
-		return targetNS
-	case sourceNS == "" && targetNS != "":
-		m["namespace"] = targetNS
-		if !*mapped {
-			*warnings = append(*warnings, fmt.Sprintf("namespace mapping: * -> %s", targetNS))
+			if sourceNS == "" {
+				*warnings = append(*warnings, fmt.Sprintf("namespace mapping: * -> %s", targetNS))
+			} else {
+				*warnings = append(*warnings, fmt.Sprintf("namespace mapping: %s -> %s", sourceNS, targetNS))
+			}
 			*mapped = true
 		}
 		return targetNS
