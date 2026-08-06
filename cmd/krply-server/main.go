@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/krply/krply/internal/api"
+	"github.com/krply/krply/internal/event"
 	"github.com/krply/krply/internal/materialize"
 	"github.com/krply/krply/internal/metrics"
 	"github.com/krply/krply/internal/replay"
@@ -29,10 +30,57 @@ func main() {
 	}
 }
 
+// seedDemo copies the events and snapshot refs from a demo SQLite fixture into
+// an empty journal. It is idempotent: when the target journal already has
+// events, it is left untouched.
+func seedDemo(ctx context.Context, store storage.Store, demoPath string) error {
+	existing, err := store.Events(ctx, storage.EventFilter{Limit: 1})
+	if err != nil {
+		return fmt.Errorf("check existing events: %w", err)
+	}
+	if len(existing) > 0 {
+		return nil
+	}
+
+	demo, err := storage.NewSQLiteStore(demoPath)
+	if err != nil {
+		return fmt.Errorf("open demo store: %w", err)
+	}
+	defer demo.Close()
+
+	recs, err := demo.Events(ctx, storage.EventFilter{})
+	if err != nil {
+		return fmt.Errorf("read demo events: %w", err)
+	}
+	if len(recs) > 0 {
+		ptrs := make([]*event.Record, 0, len(recs))
+		for i := range recs {
+			ptrs = append(ptrs, &recs[i])
+		}
+		if _, err := store.Appends(ctx, ptrs); err != nil {
+			return fmt.Errorf("append demo events: %w", err)
+		}
+	}
+
+	snaps, err := demo.Snapshots(ctx)
+	if err != nil {
+		return fmt.Errorf("read demo snapshots: %w", err)
+	}
+	for i := range snaps {
+		if err := store.SaveSnapshot(ctx, &snaps[i]); err != nil {
+			return fmt.Errorf("append demo snapshot: %w", err)
+		}
+	}
+
+	slog.Info("seeded demo journal", "events", len(recs), "snapshots", len(snaps))
+	return nil
+}
+
 func run() error {
 	var (
 		storePath = flag.String("store", "krply.db", "path to the SQLite journal")
 		listen    = flag.String("listen", ":8080", "listen address")
+		demoPath  = flag.String("demo", "", "seed an empty journal from this SQLite demo fixture")
 		showVer   = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -63,6 +111,12 @@ func run() error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer store.Close()
+
+	if *demoPath != "" {
+		if err := seedDemo(ctx, store, *demoPath); err != nil {
+			return fmt.Errorf("seed demo journal: %w", err)
+		}
+	}
 
 	mat := materialize.NewMaterializer(store)
 	planner := replay.NewPlanner(store, mat, replay.DefaultPolicy())
