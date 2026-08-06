@@ -3,7 +3,17 @@ name: vercel
 on:
   push:
     branches: [main]
+    paths:
+      - web/**
+      - .github/workflows/**
   pull_request:
+    paths:
+      - web/**
+      - .github/workflows/**
+
+concurrency:
+  group: vercel-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
