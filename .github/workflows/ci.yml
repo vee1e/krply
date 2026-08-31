@@ -64,24 +64,3 @@ jobs:
 
       - name: Verify dist
         run: test -d web/dist && test -f web/dist/index.html
-
-  web:
-    name: build web ui
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install
-        working-directory: web
-        run: npm ci
-
-      - name: Build
-        working-directory: web
-        run: npm run build
-
-      - name: Verify dist
-        run: test -d web/dist && test -f web/dist/index.html
