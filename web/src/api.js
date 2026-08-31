@@ -10,7 +10,7 @@ const PROD_HOSTS = new Set([
   'krply.lverma.com',
   'krply-web-lakshit-vermas-projects.vercel.app',
 ]);
-const DEFAULT_SERVER = PROD_HOSTS.has(location.hostname) ? 'https://krply-server.onrender.com' : '';
+const DEFAULT_SERVER = PROD_HOSTS.has(location.hostname) ? 'https://krply-api.lverma.com' : '';
 
 let base = (fromURL || localStorage.getItem(LS_KEY) || DEFAULT_SERVER).replace(/\/+$/, '');
 
